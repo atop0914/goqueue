@@ -119,7 +119,7 @@ func TestNackRetryThenDead(t *testing.T) {
 		if dj.Attempt != attempt {
 			t.Fatalf("Attempt = %d, want %d", dj.Attempt, attempt)
 		}
-		if err := q.Nack(ctx, dj.ID, sentinel, true); err != nil {
+		if err := q.Nack(ctx, dj.ID, sentinel, true, 0); err != nil {
 			t.Fatalf("nack attempt %d: %v", attempt, err)
 		}
 	}
@@ -147,7 +147,7 @@ func TestNackNonRetryableGoesToDead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := q.Nack(ctx, dj.ID, errors.New("permanent"), false); err != nil {
+	if err := q.Nack(ctx, dj.ID, errors.New("permanent"), false, 0); err != nil {
 		t.Fatal(err)
 	}
 	if dead := q.Dead(); len(dead) != 1 {

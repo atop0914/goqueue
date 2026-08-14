@@ -30,8 +30,15 @@ type Queue interface {
 	Ack(ctx context.Context, id string) error
 
 	// Nack reports a failed attempt. When retryable is true and the job still
-	// has attempts left it is re-queued; otherwise it moves to the DLQ.
-	Nack(ctx context.Context, id string, err error, retryable bool) error
+	// has attempts left it is re-queued to run again after delay; otherwise it
+	// moves to the dead-letter set.
+	//
+	// delay is the backoff interval chosen by the caller (e.g. an exponential
+	// schedule from RetryBackoff). Backends must honour it by keeping the job
+	// invisible until it elapses — for example by scheduling RunAfter = now +
+	// delay and reusing the delayed-job machinery. It is ignored when the job
+	// goes to the DLQ.
+	Nack(ctx context.Context, id string, err error, retryable bool, delay time.Duration) error
 
 	// Dead returns the current dead-letter jobs (attempts exhausted).
 	Dead() []JobInfo
@@ -54,6 +61,9 @@ type DequeuedJob struct {
 	MaxRetry   int
 	Timeout    time.Duration // per-attempt handler timeout, 0 = none
 	DequeuedAt time.Time
+	// EnqueuedAt is the job's original enqueue time. It is exposed so
+	// callbacks (e.g. OnDead) can build a full JobInfo snapshot.
+	EnqueuedAt time.Time
 }
 
 // Sentinel errors.

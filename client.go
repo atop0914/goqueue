@@ -28,6 +28,7 @@ func New(opts ...Option) *Client {
 		Queue:        NewInMemoryQueue(),
 		Workers:      DefaultWorkers,
 		PollInterval: DefaultPollInterval,
+		RetryBackoff: DefaultRetryBackoff(),
 	}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -143,15 +144,20 @@ func (c *Client) worker(id int) {
 			continue
 		}
 		retryable := dj.Attempt <= dj.MaxRetry
-		_ = c.cfg.Queue.Nack(context.Background(), dj.ID, err, retryable)
+		// Backoff the next attempt: the queue schedules it RunAfter now+delay.
+		delay := c.cfg.RetryBackoff.Delay(dj.Attempt)
+		_ = c.cfg.Queue.Nack(context.Background(), dj.ID, err, retryable, delay)
 		if !retryable {
 			info := JobInfo{
-				ID:        dj.ID,
-				Type:      dj.Type,
-				State:     StateDead,
-				Attempts:  dj.Attempt,
-				MaxRetry:  dj.MaxRetry,
-				LastError: err.Error(),
+				ID:         dj.ID,
+				Type:       dj.Type,
+				State:      StateDead,
+				Attempts:   dj.Attempt,
+				MaxRetry:   dj.MaxRetry,
+				Priority:   dj.Priority,
+				LastError:  err.Error(),
+				EnqueuedAt: dj.EnqueuedAt,
+				DeadAt:     time.Now(),
 			}
 			if c.cfg.OnDead != nil {
 				c.cfg.OnDead(info)

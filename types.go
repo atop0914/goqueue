@@ -84,6 +84,9 @@ type JobInfo struct {
 	Priority   int
 	LastError  string
 	EnqueuedAt time.Time
+	// DeadAt is when the job moved to the dead-letter set. Zero value means
+	// the job has not died (yet).
+	DeadAt time.Time
 }
 
 // jobRecord is the internal representation stored in a Queue backend.
@@ -94,4 +97,5 @@ type jobRecord struct {
 	state      JobState
 	lastError  string
 	enqueuedAt time.Time
+	deadAt     time.Time // set when the record moves to the DLQ
 }

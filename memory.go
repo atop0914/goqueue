@@ -3,6 +3,7 @@ package goqueue
 import (
 	"container/heap"
 	"context"
+	"sort"
 	"sync"
 	"time"
 )
@@ -88,6 +89,7 @@ func (q *InMemoryQueue) Dequeue(ctx context.Context) (*DequeuedJob, error) {
 					MaxRetry:   top.job.MaxRetry,
 					Timeout:    top.job.Timeout,
 					DequeuedAt: q.now(),
+					EnqueuedAt: top.enqueuedAt,
 				}
 				q.mu.Unlock()
 				return dj, nil
@@ -129,8 +131,10 @@ func (q *InMemoryQueue) Ack(_ context.Context, id string) error {
 }
 
 // Nack implements Queue. When retryable is true and the job still has
-// attempts left it is re-queued immediately; otherwise it moves to the DLQ.
-func (q *InMemoryQueue) Nack(_ context.Context, id string, err error, retryable bool) error {
+// attempts left it is re-queued to run again after delay (the retry is
+// scheduled via RunAfter, reusing the delayed-job machinery); otherwise it
+// moves to the DLQ.
+func (q *InMemoryQueue) Nack(_ context.Context, id string, err error, retryable bool, delay time.Duration) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	rec, ok := q.inflight[id]
@@ -144,17 +148,22 @@ func (q *InMemoryQueue) Nack(_ context.Context, id string, err error, retryable 
 	}
 	if retryable && rec.attempts <= rec.job.MaxRetry {
 		rec.state = StateFailed
+		if delay > 0 {
+			rec.job.RunAfter = q.now().Add(delay)
+		}
 		heap.Push(&q.heap, rec)
 		q.signal()
 		return nil
 	}
 	// Retries exhausted or explicitly non-retryable: move to DLQ.
 	rec.state = StateDead
+	rec.deadAt = q.now()
 	q.dead[id] = rec
 	return nil
 }
 
-// Dead implements Queue.
+// Dead implements Queue. Results are sorted by death time ascending (the
+// earliest-died job first), so the DLQ reads as a timeline.
 func (q *InMemoryQueue) Dead() []JobInfo {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -162,6 +171,12 @@ func (q *InMemoryQueue) Dead() []JobInfo {
 	for _, rec := range q.dead {
 		out = append(out, rec.info())
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].DeadAt.Equal(out[j].DeadAt) {
+			return out[i].DeadAt.Before(out[j].DeadAt)
+		}
+		return out[i].ID < out[j].ID
+	})
 	return out
 }
 
@@ -206,6 +221,7 @@ func (r *jobRecord) info() JobInfo {
 		Priority:   r.job.Priority,
 		LastError:  r.lastError,
 		EnqueuedAt: r.enqueuedAt,
+		DeadAt:     r.deadAt,
 	}
 }
 

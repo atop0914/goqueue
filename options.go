@@ -20,8 +20,13 @@ type Config struct {
 	Queue        Queue
 	Workers      int
 	PollInterval time.Duration
+	// RetryBackoff is the exponential backoff schedule applied between
+	// retries. Defaults to DefaultRetryBackoff.
+	RetryBackoff RetryBackoff
 	// OnDead is invoked (synchronously, from the worker goroutine) when a
-	// job exhausts its retries and moves to the DLQ. It may be nil.
+	// job exhausts its retries and moves to the DLQ. It may be nil. The
+	// JobInfo is the full snapshot: ID, Type, Attempts, MaxRetry, Priority,
+	// LastError, EnqueuedAt and DeadAt.
 	OnDead func(JobInfo)
 }
 
@@ -54,7 +59,14 @@ func WithPollInterval(d time.Duration) Option {
 }
 
 // WithOnDead registers a callback invoked when a job is moved to the
-// dead-letter set.
+// dead-letter set. The callback receives the full JobInfo snapshot (see
+// Config.OnDead).
 func WithOnDead(fn func(JobInfo)) Option {
 	return func(c *Config) { c.OnDead = fn }
+}
+
+// WithRetryBackoff sets the exponential backoff schedule used between
+// retry attempts. Leave unset to use DefaultRetryBackoff.
+func WithRetryBackoff(b RetryBackoff) Option {
+	return func(c *Config) { c.RetryBackoff = b }
 }

@@ -14,6 +14,7 @@ type Client struct {
 	cfg        Config
 	mu         sync.RWMutex
 	types      map[string]Handler
+	tasks      map[string]*scheduledTask
 	started    atomic.Bool
 	stop       chan struct{}
 	baseCtx    context.Context
@@ -37,6 +38,7 @@ func New(opts ...Option) *Client {
 	return &Client{
 		cfg:        cfg,
 		types:      make(map[string]Handler),
+		tasks:      make(map[string]*scheduledTask),
 		stop:       make(chan struct{}),
 		baseCtx:    baseCtx,
 		baseCancel: baseCancel,
@@ -83,6 +85,7 @@ func (c *Client) Shutdown(ctx context.Context) error {
 	}
 	close(c.stop)
 	c.baseCancel() // unblock workers waiting in Dequeue
+	c.stopTasks()  // stop recurring scheduled tasks
 	done := make(chan struct{})
 	go func() {
 		c.wg.Wait()

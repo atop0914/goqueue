@@ -28,6 +28,9 @@ type Config struct {
 	// JobInfo is the full snapshot: ID, Type, Attempts, MaxRetry, Priority,
 	// LastError, EnqueuedAt and DeadAt.
 	OnDead func(JobInfo)
+	// now is the clock used by time-dependent features (scheduler). Defaults
+	// to time.Now. Mostly for tests.
+	now func() time.Time
 }
 
 // Option configures a Client.
@@ -69,4 +72,14 @@ func WithOnDead(fn func(JobInfo)) Option {
 // retry attempts. Leave unset to use DefaultRetryBackoff.
 func WithRetryBackoff(b RetryBackoff) Option {
 	return func(c *Config) { c.RetryBackoff = b }
+}
+
+// WithClock overrides the scheduler's clock. Leave unset to use time.Now.
+// Provided for deterministic tests of scheduled tasks.
+func WithClock(now func() time.Time) Option {
+	return func(c *Config) {
+		if now != nil {
+			c.now = now
+		}
+	}
 }

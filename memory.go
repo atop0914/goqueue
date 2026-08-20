@@ -20,6 +20,7 @@ type InMemoryQueue struct {
 	heap     jobHeap
 	inflight map[string]*jobRecord // dequeued, awaiting Ack/Nack
 	dead     map[string]*jobRecord
+	unique   map[string]string // UniqueKey -> job ID while that key is held
 	seq      uint64
 	closed   bool
 	notify   chan struct{}
@@ -31,6 +32,7 @@ func NewInMemoryQueue() *InMemoryQueue {
 	return &InMemoryQueue{
 		inflight: make(map[string]*jobRecord),
 		dead:     make(map[string]*jobRecord),
+		unique:   make(map[string]string),
 		notify:   make(chan struct{}, 1),
 		now:      time.Now,
 	}
@@ -40,7 +42,6 @@ func NewInMemoryQueue() *InMemoryQueue {
 func (q *InMemoryQueue) Enqueue(_ context.Context, job Job) (string, error) {
 	rec := &jobRecord{
 		job:        job,
-		seq:        q.nextSeq(),
 		state:      StatePending,
 		enqueuedAt: q.now(),
 	}
@@ -52,9 +53,22 @@ func (q *InMemoryQueue) Enqueue(_ context.Context, job Job) (string, error) {
 	}
 
 	q.mu.Lock()
+	// seq must be assigned under the lock: it is shared across concurrent
+	// Enqueue calls and ordering correctness depends on it.
+	rec.seq = q.nextSeq()
 	if q.closed {
 		q.mu.Unlock()
 		return "", ErrQueueClosed
+	}
+	// Unique jobs: reject if the key is already held by a pending or running
+	// job. The key stays held across retries and is only released on Ack
+	// (success) or when the job moves to the DLQ.
+	if rec.job.UniqueKey != "" {
+		if _, dup := q.unique[rec.job.UniqueKey]; dup {
+			q.mu.Unlock()
+			return "", ErrJobExists
+		}
+		q.unique[rec.job.UniqueKey] = rec.job.ID
 	}
 	heap.Push(&q.heap, rec)
 	q.mu.Unlock()
@@ -127,6 +141,7 @@ func (q *InMemoryQueue) Ack(_ context.Context, id string) error {
 	delete(q.inflight, id)
 	rec.state = StateSucceeded
 	rec.lastError = ""
+	q.releaseUnique(rec)
 	return nil
 }
 
@@ -151,6 +166,7 @@ func (q *InMemoryQueue) Nack(_ context.Context, id string, err error, retryable 
 		if delay > 0 {
 			rec.job.RunAfter = q.now().Add(delay)
 		}
+		// Unique key stays held across retries.
 		heap.Push(&q.heap, rec)
 		q.signal()
 		return nil
@@ -159,6 +175,7 @@ func (q *InMemoryQueue) Nack(_ context.Context, id string, err error, retryable 
 	rec.state = StateDead
 	rec.deadAt = q.now()
 	q.dead[id] = rec
+	q.releaseUnique(rec)
 	return nil
 }
 
@@ -202,6 +219,19 @@ func (q *InMemoryQueue) Close() error {
 func (q *InMemoryQueue) nextSeq() uint64 {
 	q.seq++
 	return q.seq
+}
+
+// releaseUnique frees the job's UniqueKey (if any) so a later job with the
+// same key may be enqueued. Called only when the job leaves the active set:
+// on Ack (success) or when it moves to the DLQ. It must be called with q.mu
+// held.
+func (q *InMemoryQueue) releaseUnique(rec *jobRecord) {
+	if rec.job.UniqueKey == "" {
+		return
+	}
+	if q.unique[rec.job.UniqueKey] == rec.job.ID {
+		delete(q.unique, rec.job.UniqueKey)
+	}
 }
 
 func (q *InMemoryQueue) signal() {

@@ -39,6 +39,13 @@ type Job struct {
 
 	// RunAfter defers execution until this time. Zero value means "run now".
 	RunAfter time.Time
+
+	// UniqueKey, when set, makes this a unique job: at most one job with the
+	// same UniqueKey may be pending or running at any moment. Enqueuing a
+	// second job with an in-flight key fails with ErrJobExists. The key is
+	// released once the job succeeds (Ack) or moves to the DLQ (Nack
+	// exhausted); a retry keeps the key held.
+	UniqueKey string
 }
 
 // JobState is the lifecycle state of a job.

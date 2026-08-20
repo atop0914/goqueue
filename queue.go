@@ -76,4 +76,7 @@ var (
 	// ErrJobNotFound is returned when ack/nacking a job the queue no longer
 	// tracks (e.g. already acked).
 	ErrJobNotFound = errors.New("goqueue: job not found")
+	// ErrJobExists is returned by Enqueue for a unique job whose UniqueKey is
+	// already held by a pending or running job.
+	ErrJobExists = errors.New("goqueue: unique job already in flight")
 )

@@ -74,8 +74,9 @@ func (c *Client) Schedule(spec Schedule, build func() Job) string {
 			c.mu.RUnlock()
 			if hasType {
 				// Fire and forget: schedule should not block on backpressure.
-				_, err := c.cfg.Queue.Enqueue(context.Background(), job)
-				_ = err
+				// Going through Client.Enqueue keeps the OnEnqueue hook firing
+				// for scheduled jobs too.
+				_, _ = c.Enqueue(context.Background(), job)
 			}
 		}
 	}()

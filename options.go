@@ -23,10 +23,11 @@ type Config struct {
 	// RetryBackoff is the exponential backoff schedule applied between
 	// retries. Defaults to DefaultRetryBackoff.
 	RetryBackoff RetryBackoff
-	// OnDead is invoked (synchronously, from the worker goroutine) when a
-	// job exhausts its retries and moves to the DLQ. It may be nil. The
-	// JobInfo is the full snapshot: ID, Type, Attempts, MaxRetry, Priority,
-	// LastError, EnqueuedAt and DeadAt.
+	// Hooks holds the optional job-lifecycle callbacks (see hooks.go).
+	// Any nil callback is simply not fired.
+	Hooks Hooks
+	// OnDead is the legacy dead-letter callback. Deprecated: use
+	// Hooks.OnDead via WithHooks. When both are set, Hooks.OnDead wins.
 	OnDead func(JobInfo)
 	// now is the clock used by time-dependent features (scheduler). Defaults
 	// to time.Now. Mostly for tests.

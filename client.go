@@ -15,6 +15,7 @@ type Client struct {
 	mu         sync.RWMutex
 	types      map[string]Handler
 	tasks      map[string]*scheduledTask
+	results    sync.Map // job ID -> *resultSlot (typed-result jobs only)
 	started    atomic.Bool
 	stop       chan struct{}
 	baseCtx    context.Context
@@ -54,6 +55,8 @@ func (c *Client) Register(taskType string, h Handler) {
 }
 
 // Enqueue submits a job and returns its ID. The job type must be registered.
+// After a successful enqueue the OnEnqueue hook (if set) fires with the
+// pending job's snapshot.
 func (c *Client) Enqueue(ctx context.Context, job Job) (string, error) {
 	c.mu.RLock()
 	_, ok := c.types[job.Type]
@@ -61,7 +64,22 @@ func (c *Client) Enqueue(ctx context.Context, job Job) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("%w: %q", ErrUnknownType, job.Type)
 	}
-	return c.cfg.Queue.Enqueue(ctx, job)
+	id, err := c.cfg.Queue.Enqueue(ctx, job)
+	if err != nil {
+		return "", err
+	}
+	if h := c.cfg.Hooks.OnEnqueue; h != nil {
+		h(JobInfo{
+			ID:         id,
+			Type:       job.Type,
+			State:      StatePending,
+			Attempts:   0,
+			MaxRetry:   job.MaxRetry,
+			Priority:   job.Priority,
+			EnqueuedAt: time.Now(),
+		})
+	}
+	return id, nil
 }
 
 // Start launches the worker pool. It returns immediately; workers run in the
@@ -133,38 +151,47 @@ func (c *Client) worker(id int) {
 			continue
 		}
 
-		// Run the handler with a per-attempt timeout if configured.
+		// Run the handler with a per-attempt timeout if configured. The job ID
+		// is carried in the context so typed-result handlers can publish their
+		// outcome.
 		runCtx, cancelRun := context.WithCancel(context.Background())
 		if dj.Timeout > 0 {
 			runCtx, cancelRun = context.WithTimeout(runCtx, dj.Timeout)
 		}
+		runCtx = context.WithValue(runCtx, jobIDKey{}, dj.ID)
 
 		err = c.invoke(runCtx, dj)
 		cancelRun()
 
 		if err == nil {
 			_ = c.cfg.Queue.Ack(context.Background(), dj.ID)
+			if h := c.cfg.Hooks.OnSuccess; h != nil {
+				h(dj.jobInfo(StateSucceeded, "", time.Time{}))
+			}
 			continue
 		}
 		retryable := dj.Attempt <= dj.MaxRetry
 		// Backoff the next attempt: the queue schedules it RunAfter now+delay.
 		delay := c.cfg.RetryBackoff.Delay(dj.Attempt)
 		_ = c.cfg.Queue.Nack(context.Background(), dj.ID, err, retryable, delay)
-		if !retryable {
-			info := JobInfo{
-				ID:         dj.ID,
-				Type:       dj.Type,
-				State:      StateDead,
-				Attempts:   dj.Attempt,
-				MaxRetry:   dj.MaxRetry,
-				Priority:   dj.Priority,
-				LastError:  err.Error(),
-				EnqueuedAt: dj.EnqueuedAt,
-				DeadAt:     time.Now(),
+		// Every failed attempt fires OnFailure; retriable attempts additionally
+		// fire OnRetry, exhausted attempts fire OnDead.
+		info := dj.jobInfo(StateFailed, err.Error(), time.Time{})
+		if h := c.cfg.Hooks.OnFailure; h != nil {
+			h(info)
+		}
+		if retryable {
+			if h := c.cfg.Hooks.OnRetry; h != nil {
+				h(info)
 			}
-			if c.cfg.OnDead != nil {
-				c.cfg.OnDead(info)
-			}
+			continue
+		}
+		info.State = StateDead
+		info.DeadAt = time.Now()
+		if h := c.cfg.Hooks.OnDead; h != nil {
+			h(info)
+		} else if c.cfg.OnDead != nil {
+			c.cfg.OnDead(info) // backward compatibility
 		}
 	}
 }

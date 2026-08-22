@@ -154,15 +154,19 @@ func (c *Client) Info() (pending, dead int) {
 func (c *Client) worker(id int) {
 	defer c.wg.Done()
 	for {
-		// Drain mode: exit once the stop signal arrived AND the queue is
-		// fully drained (nothing pending, nothing in flight).
-		if c.draining() && c.drainDone() {
-			c.baseCancel() // wake peers blocked in Dequeue
-			return
-		}
+		// Stop received? Normal mode exits immediately; drain mode keeps
+		// consuming and only exits once the queue is fully drained (nothing
+		// pending, nothing in flight). Before stop arrives, an empty queue
+		// is merely a waiting state — the worker must never leave early,
+		// otherwise a pool started before jobs are enqueued would exit
+		// before doing any work.
 		select {
 		case <-c.stop:
 			if !c.draining() {
+				return
+			}
+			if c.drainDone() {
+				c.baseCancel() // wake peers blocked in Dequeue
 				return
 			}
 		default:

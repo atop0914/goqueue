@@ -29,6 +29,17 @@ type Config struct {
 	// OnDead is the legacy dead-letter callback. Deprecated: use
 	// Hooks.OnDead via WithHooks. When both are set, Hooks.OnDead wins.
 	OnDead func(JobInfo)
+	// MaxConcurrency caps the number of handler invocations running at the
+	// same time across the whole pool. Zero (the default) means unlimited:
+	// every worker may run its handler when it dequeues a job. When set to
+	// a value smaller than Workers, the surplus workers block on the
+	// semaphore until a slot frees up.
+	MaxConcurrency int
+	// DrainOnShutdown makes Shutdown process every job that is already
+	// enqueued (including delayed ones) before returning, instead of the
+	// default behaviour of only waiting for the handlers currently running
+	// and leaving the rest pending for the next Start.
+	DrainOnShutdown bool
 	// now is the clock used by time-dependent features (scheduler). Defaults
 	// to time.Now. Mostly for tests.
 	now func() time.Time
@@ -73,6 +84,34 @@ func WithOnDead(fn func(JobInfo)) Option {
 // retry attempts. Leave unset to use DefaultRetryBackoff.
 func WithRetryBackoff(b RetryBackoff) Option {
 	return func(c *Config) { c.RetryBackoff = b }
+}
+
+// WithMaxConcurrency caps how many handler invocations may run at the same
+// time across the whole worker pool. It is useful when handlers contend for
+// a limited external resource (a database connection pool, an upstream API
+// quota, ...) even though workers themselves are cheap goroutines. Zero
+// means unlimited; a value below WithWorkers makes the surplus workers wait
+// for a free slot before running a handler.
+func WithMaxConcurrency(n int) Option {
+	return func(c *Config) {
+		if n > 0 {
+			c.MaxConcurrency = n
+		}
+	}
+}
+
+// WithDrainOnShutdown switches Shutdown into drain mode: instead of leaving
+// enqueued jobs for the next Start, Shutdown keeps the workers consuming the
+// queue until every pending job (including delayed ones) has been processed,
+// and only then returns. Combined with an at-least-once backend this gives a
+// "finish what was submitted before we stop" guarantee. Note that jobs
+// enqueued concurrently while draining are not part of the guarantee.
+func WithDrainOnShutdown(drain bool) Option {
+	return func(c *Config) {
+		if drain {
+			c.DrainOnShutdown = true
+		}
+	}
 }
 
 // WithClock overrides the scheduler's clock. Leave unset to use time.Now.

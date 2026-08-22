@@ -21,6 +21,12 @@ type Client struct {
 	baseCtx    context.Context
 	baseCancel context.CancelFunc
 	wg         sync.WaitGroup
+	// sem caps concurrent handler invocations; nil when MaxConcurrency is
+	// unset (unlimited).
+	sem chan struct{}
+	// inflight counts jobs that have been dequeued but not yet Acked/Nacked.
+	// Drain mode waits for it to reach zero together with an empty queue.
+	inflight atomic.Int64
 }
 
 // New creates a Client with the given options. The default queue is an
@@ -36,7 +42,7 @@ func New(opts ...Option) *Client {
 		opt(&cfg)
 	}
 	baseCtx, baseCancel := context.WithCancel(context.Background())
-	return &Client{
+	cli := &Client{
 		cfg:        cfg,
 		types:      make(map[string]Handler),
 		tasks:      make(map[string]*scheduledTask),
@@ -44,6 +50,10 @@ func New(opts ...Option) *Client {
 		baseCtx:    baseCtx,
 		baseCancel: baseCancel,
 	}
+	if cfg.MaxConcurrency > 0 {
+		cli.sem = make(chan struct{}, cfg.MaxConcurrency)
+	}
+	return cli
 }
 
 // Register binds a handler to a job type. Enqueuing a job whose type has no
@@ -94,16 +104,31 @@ func (c *Client) Start() {
 	}
 }
 
-// Shutdown stops the worker pool gracefully: workers finish the job they are
-// currently handling, then exit. Pending jobs remain in the queue and can be
-// picked up after restart. It blocks until all workers have exited.
+// Shutdown stops the worker pool gracefully. In the default mode workers
+// finish the job they are currently handling, then exit; jobs still pending
+// in the queue are left for the next Start. With WithDrainOnShutdown, the
+// workers instead keep consuming the queue until every pending job has been
+// processed, which is useful for "finish the backlog before we stop"
+// scenarios (e.g. graceful pod shutdown in a deployment). In both modes the
+// given ctx bounds the total wait: once it expires, Shutdown returns
+// ctx.Err() and any remaining workers exit on their own schedule.
 func (c *Client) Shutdown(ctx context.Context) error {
 	if !c.started.CompareAndSwap(true, false) {
 		return nil
 	}
 	close(c.stop)
-	c.baseCancel() // unblock workers waiting in Dequeue
-	c.stopTasks()  // stop recurring scheduled tasks
+	c.stopTasks() // stop recurring scheduled tasks
+	if c.draining() {
+		// Drain mode: keep the base context alive so Dequeue keeps
+		// delivering the remaining backlog. Workers cancel it themselves
+		// once the queue is empty and nothing is in flight. Nothing to
+		// drain? Wake everyone immediately.
+		if c.drainDone() {
+			c.baseCancel()
+		}
+	} else {
+		c.baseCancel() // unblock workers waiting in Dequeue
+	}
 	done := make(chan struct{})
 	go func() {
 		c.wg.Wait()
@@ -129,71 +154,113 @@ func (c *Client) Info() (pending, dead int) {
 func (c *Client) worker(id int) {
 	defer c.wg.Done()
 	for {
+		// Drain mode: exit once the stop signal arrived AND the queue is
+		// fully drained (nothing pending, nothing in flight).
+		if c.draining() && c.drainDone() {
+			c.baseCancel() // wake peers blocked in Dequeue
+			return
+		}
 		select {
 		case <-c.stop:
-			return
+			if !c.draining() {
+				return
+			}
 		default:
 		}
 
-		ctx := c.baseCtx
-		dj, err := c.cfg.Queue.Dequeue(ctx)
+		dj, err := c.cfg.Queue.Dequeue(c.baseCtx)
 		if err != nil {
 			if err == ErrQueueClosed {
 				return
 			}
-			// Cancelled (shutdown) or transient error: brief backoff, then
-			// re-check stop at the top of the loop.
+			// Cancelled or transient error: re-check everything. In drain
+			// mode a base-context cancel is not an exit signal — the queue
+			// may still hold jobs — so only leave when drained.
+			if c.draining() && c.drainDone() {
+				c.baseCancel()
+				return
+			}
 			select {
 			case <-c.stop:
-				return
+				if !c.draining() {
+					return
+				}
 			case <-time.After(c.cfg.PollInterval):
 			}
 			continue
 		}
 
-		// Run the handler with a per-attempt timeout if configured. The job ID
-		// is carried in the context so typed-result handlers can publish their
-		// outcome.
-		runCtx, cancelRun := context.WithCancel(context.Background())
-		if dj.Timeout > 0 {
-			runCtx, cancelRun = context.WithTimeout(runCtx, dj.Timeout)
-		}
-		runCtx = context.WithValue(runCtx, jobIDKey{}, dj.ID)
-
-		err = c.invoke(runCtx, dj)
-		cancelRun()
-
-		if err == nil {
-			_ = c.cfg.Queue.Ack(context.Background(), dj.ID)
-			if h := c.cfg.Hooks.OnSuccess; h != nil {
-				h(dj.jobInfo(StateSucceeded, "", time.Time{}))
-			}
-			continue
-		}
-		retryable := dj.Attempt <= dj.MaxRetry
-		// Backoff the next attempt: the queue schedules it RunAfter now+delay.
-		delay := c.cfg.RetryBackoff.Delay(dj.Attempt)
-		_ = c.cfg.Queue.Nack(context.Background(), dj.ID, err, retryable, delay)
-		// Every failed attempt fires OnFailure; retriable attempts additionally
-		// fire OnRetry, exhausted attempts fire OnDead.
-		info := dj.jobInfo(StateFailed, err.Error(), time.Time{})
-		if h := c.cfg.Hooks.OnFailure; h != nil {
-			h(info)
-		}
-		if retryable {
-			if h := c.cfg.Hooks.OnRetry; h != nil {
-				h(info)
-			}
-			continue
-		}
-		info.State = StateDead
-		info.DeadAt = time.Now()
-		if h := c.cfg.Hooks.OnDead; h != nil {
-			h(info)
-		} else if c.cfg.OnDead != nil {
-			c.cfg.OnDead(info) // backward compatibility
-		}
+		c.inflight.Add(1)
+		c.process(dj)
+		c.inflight.Add(-1)
 	}
+}
+
+// process runs one dequeued job through the semaphore (if configured), the
+// registered handler and the ack/nack + hooks flow. It is called by workers;
+// panics inside handlers are recovered by invoke and surface as errors here,
+// so a panicking handler never kills the pool.
+func (c *Client) process(dj *DequeuedJob) {
+	// Cap concurrent handlers with the semaphore, if configured. The job is
+	// already dequeued, so we block rather than drop it: a free slot is
+	// guaranteed once the running handlers finish.
+	if c.sem != nil {
+		c.sem <- struct{}{}
+		defer func() { <-c.sem }()
+	}
+
+	// Run the handler with a per-attempt timeout if configured. The job ID
+	// is carried in the context so typed-result handlers can publish their
+	// outcome.
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	if dj.Timeout > 0 {
+		runCtx, cancelRun = context.WithTimeout(runCtx, dj.Timeout)
+	}
+	runCtx = context.WithValue(runCtx, jobIDKey{}, dj.ID)
+
+	err := c.invoke(runCtx, dj)
+	cancelRun()
+
+	if err == nil {
+		_ = c.cfg.Queue.Ack(context.Background(), dj.ID)
+		if h := c.cfg.Hooks.OnSuccess; h != nil {
+			h(dj.jobInfo(StateSucceeded, "", time.Time{}))
+		}
+		return
+	}
+	retryable := dj.Attempt <= dj.MaxRetry
+	// Backoff the next attempt: the queue schedules it RunAfter now+delay.
+	delay := c.cfg.RetryBackoff.Delay(dj.Attempt)
+	_ = c.cfg.Queue.Nack(context.Background(), dj.ID, err, retryable, delay)
+	// Every failed attempt fires OnFailure; retriable attempts additionally
+	// fire OnRetry, exhausted attempts fire OnDead.
+	info := dj.jobInfo(StateFailed, err.Error(), time.Time{})
+	if h := c.cfg.Hooks.OnFailure; h != nil {
+		h(info)
+	}
+	if retryable {
+		if h := c.cfg.Hooks.OnRetry; h != nil {
+			h(info)
+		}
+		return
+	}
+	info.State = StateDead
+	info.DeadAt = time.Now()
+	if h := c.cfg.Hooks.OnDead; h != nil {
+		h(info)
+	} else if c.cfg.OnDead != nil {
+		c.cfg.OnDead(info) // backward compatibility
+	}
+}
+
+// draining reports whether Shutdown must drain the queue before returning.
+func (c *Client) draining() bool { return c.cfg.DrainOnShutdown }
+
+// drainDone reports whether the queue holds nothing left to process: no
+// pending jobs and no dequeued-but-unfinished jobs. Only meaningful while
+// draining; callers must hold no assumptions about queue internals.
+func (c *Client) drainDone() bool {
+	return c.inflight.Load() == 0 && c.cfg.Queue.Len() == 0
 }
 
 // invoke looks up the handler and runs it, recovering from panics.

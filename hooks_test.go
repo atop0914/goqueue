@@ -309,6 +309,12 @@ func TestHooks_ConcurrentJobs(t *testing.T) {
 			dead.Load() >= 1
 	})
 
+	// Every job must reach a terminal state (succeeded or dead). The waitFor
+	// above only guarantees activity; bad jobs still backing off need time
+	// to run their final retry, so wait for the full closure before the
+	// consistency assertions below.
+	waitFor(t, 3*time.Second, func() bool { return succ.Load()+dead.Load() == n })
+
 	// Total invocations must be consistent: every enqueued job either
 	// succeeded (1 success, 0 further events) or died (failures = attempts).
 	if enq.Load() != n {

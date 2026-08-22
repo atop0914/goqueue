@@ -74,7 +74,8 @@ func TestDrainOnShutdown(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := runs.Load(); got != total {
-		t.Fatalf("processed = %d, want %d (drain must finish the whole backlog)", got, total)
+		t.Fatalf("processed = %d, want %d (drain must finish the whole backlog); queue len=%d inflight=%d",
+			got, total, c.Queue().Len(), c.inflight.Load())
 	}
 	if got := c.Queue().Len(); got != 0 {
 		t.Fatalf("queue length = %d, want 0 after drain", got)
@@ -104,7 +105,8 @@ func TestDrainWaitsForDelayedJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := runs.Load(); got != 1 {
-		t.Fatalf("processed = %d, want 1 (drain must wait for delayed jobs)", got)
+		t.Fatalf("processed = %d, want 1 (drain must wait for delayed jobs); queue len=%d inflight=%d",
+			got, c.Queue().Len(), c.inflight.Load())
 	}
 }
 

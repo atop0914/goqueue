@@ -64,6 +64,9 @@ const (
 	StateDead
 )
 
+// String returns the human-readable name of the state ("pending",
+// "running", "succeeded", "failed", "dead"). Unknown values yield
+// "unknown".
 func (s JobState) String() string {
 	switch s {
 	case StatePending:

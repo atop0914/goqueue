@@ -22,7 +22,7 @@ type Queue interface {
 	Enqueue(ctx context.Context, job Job) (string, error)
 
 	// Dequeue blocks until a job is ready to run (RunAfter elapsed) or the
-	// context is cancelled. It returns ErrQueueClosed when the queue has been
+	// context is canceled. It returns ErrQueueClosed when the queue has been
 	// closed and drained.
 	Dequeue(ctx context.Context) (*DequeuedJob, error)
 
@@ -34,7 +34,7 @@ type Queue interface {
 	// moves to the dead-letter set.
 	//
 	// delay is the backoff interval chosen by the caller (e.g. an exponential
-	// schedule from RetryBackoff). Backends must honour it by keeping the job
+	// schedule from RetryBackoff). Backends must honor it by keeping the job
 	// invisible until it elapses — for example by scheduling RunAfter = now +
 	// delay and reusing the delayed-job machinery. It is ignored when the job
 	// goes to the DLQ.

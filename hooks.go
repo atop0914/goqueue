@@ -41,7 +41,7 @@ type Hooks struct {
 
 // WithHooks registers the lifecycle hook callbacks. Hooks are optional; any
 // nil callback is simply not fired. This replaces the older WithOnDead
-// option (which is kept for backward compatibility and is still honoured).
+// option (which is kept for backward compatibility and is still honored).
 func WithHooks(h Hooks) Option {
 	return func(c *Config) { c.Hooks = h }
 }

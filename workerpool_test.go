@@ -121,7 +121,7 @@ func TestShutdownLeavesPendingJobs(t *testing.T) {
 	c.Register("work", func(ctx context.Context, payload []byte) error {
 		runs.Add(1)
 		select {
-		case <-started: // already signalled
+		case <-started: // already signaled
 		default:
 			close(started)
 		}
@@ -150,7 +150,7 @@ func TestShutdownLeavesPendingJobs(t *testing.T) {
 }
 
 // TestDrainShutdownRespectsContext verifies that a drain-mode Shutdown still
-// honours its context: a handler that never returns must not block Shutdown
+// honors its context: a handler that never returns must not block Shutdown
 // forever — it returns ctx.Err() and the worker finishes on its own schedule.
 func TestDrainShutdownRespectsContext(t *testing.T) {
 	c := New(WithWorkers(1), WithDrainOnShutdown(true))

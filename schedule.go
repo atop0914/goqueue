@@ -108,7 +108,7 @@ func (cs cronSchedule) Next(after time.Time) (time.Time, bool) {
 func (cs cronSchedule) match(t time.Time) bool {
 	// Day-of-month and weekday are OR'd (Vixie cron semantics): a day
 	// matches if either the day-of-month or the weekday field matches.
-	if !(cs.dom.has(t.Day()) || cs.dow.has(int(t.Weekday()))) {
+	if !cs.dom.has(t.Day()) && !cs.dow.has(int(t.Weekday())) {
 		return false
 	}
 	return cs.sec.has(t.Second()) &&

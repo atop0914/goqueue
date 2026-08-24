@@ -36,7 +36,7 @@ func TestRetryBackoffDelay(t *testing.T) {
 }
 
 func TestRetryBackoffZeroValue(t *testing.T) {
-	// A zero-value backoff means "re-queue immediately" (old behaviour),
+	// A zero-value backoff means "re-queue immediately" (old behavior),
 	// never an infinite or negative delay.
 	var b RetryBackoff
 	if got := b.Delay(1); got != 0 {

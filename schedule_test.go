@@ -107,7 +107,7 @@ func TestCronRangeAndList(t *testing.T) {
 func TestCronDomainWeekday(t *testing.T) {
 	// Day-of-month and weekday are OR'd (Vixie semantics). With dow=* every
 	// day matches, so a `13 * *` cron fires daily rather than only on the
-	// 13th — this is the standard cron behaviour worth pinning down.
+	// 13th — this is the standard cron behavior worth pinning down.
 	s, err := Cron("0 0 12 13 * *")
 	if err != nil {
 		t.Fatal(err)

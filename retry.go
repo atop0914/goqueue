@@ -10,7 +10,7 @@ import (
 // delay, so repeated failures spread out instead of hammering the backend.
 //
 // The zero value is usable: Delay always returns 0, which preserves the old
-// "re-queue immediately" behaviour.
+// "re-queue immediately" behavior.
 type RetryBackoff struct {
 	// InitialInterval is the delay before the first retry.
 	InitialInterval time.Duration
@@ -23,7 +23,7 @@ type RetryBackoff struct {
 
 // DefaultRetryBackoff returns the recommended schedule: 100ms, 200ms,
 // 400ms, ... doubling each retry, capped at 30s. The same defaults used by
-// asynq, so behaviour is familiar to users migrating.
+// asynq, so behavior is familiar to users migrating.
 func DefaultRetryBackoff() RetryBackoff {
 	return RetryBackoff{
 		InitialInterval: 100 * time.Millisecond,

@@ -37,7 +37,7 @@ type Config struct {
 	MaxConcurrency int
 	// DrainOnShutdown makes Shutdown process every job that is already
 	// enqueued (including delayed ones) before returning, instead of the
-	// default behaviour of only waiting for the handlers currently running
+	// default behavior of only waiting for the handlers currently running
 	// and leaving the rest pending for the next Start.
 	DrainOnShutdown bool
 	// now is the clock used by time-dependent features (scheduler). Defaults

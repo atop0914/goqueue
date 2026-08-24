@@ -173,7 +173,7 @@ func TestDequeueContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := q.Dequeue(ctx); err == nil {
-		t.Fatal("Dequeue with cancelled ctx: want error")
+		t.Fatal("Dequeue with canceled ctx: want error")
 	}
 }
 

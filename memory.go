@@ -77,7 +77,7 @@ func (q *InMemoryQueue) Enqueue(_ context.Context, job Job) (string, error) {
 }
 
 // Dequeue implements Queue. It blocks until a job is ready to run or the
-// context is cancelled, and returns ErrQueueClosed once the queue is closed
+// context is canceled, and returns ErrQueueClosed once the queue is closed
 // and drained.
 func (q *InMemoryQueue) Dequeue(ctx context.Context) (*DequeuedJob, error) {
 	for {

@@ -177,7 +177,7 @@ func (c *Client) worker(id int) {
 			if err == ErrQueueClosed {
 				return
 			}
-			// Cancelled or transient error: re-check everything. In drain
+			// Canceled or transient error: re-check everything. In drain
 			// mode a base-context cancel is not an exit signal — the queue
 			// may still hold jobs — so only leave when drained.
 			if c.draining() && c.drainDone() {

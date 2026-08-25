@@ -21,7 +21,6 @@ package dashboard
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -218,7 +217,7 @@ func (d *Dashboard) deadJobs() []deadJobDTO {
 func (d *Dashboard) handleLiveness(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintln(w, "ok")
+	_, _ = fmt.Fprintln(w, "ok")
 }
 
 func (d *Dashboard) handleReadiness(w http.ResponseWriter, r *http.Request) {
@@ -226,13 +225,13 @@ func (d *Dashboard) handleReadiness(w http.ResponseWriter, r *http.Request) {
 		if err := d.ready(); err != nil {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.WriteHeader(http.StatusServiceUnavailable)
-			fmt.Fprintf(w, "not ready: %v\n", err)
+			_, _ = fmt.Fprintf(w, "not ready: %v\n", err)
 			return
 		}
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintln(w, "ready")
+	_, _ = fmt.Fprintln(w, "ready")
 }
 
 // ---- HTML overview ----
@@ -316,9 +315,6 @@ func writeJSON(w http.ResponseWriter, v any) {
 		_ = err
 	}
 }
-
-// errorInvalidPath is kept as a named error for future extension points.
-var errorInvalidPath = errors.New("dashboard: invalid path")
 
 // overviewTemplate is the embedded dashboard page. It renders the initial
 // snapshot server-side and then refreshes the numbers in place via the JSON

@@ -29,6 +29,8 @@ id, err := q.Enqueue(ctx, goqueue.Job{
 - **Lifecycle hooks** — `OnEnqueue` / `OnSuccess` / `OnFailure` / `OnRetry` / `OnDead`
 - **Worker pool** — configurable concurrency (`WithMaxConcurrency`), graceful
   shutdown (`WithDrainOnShutdown`), panic recovery
+- **HTTP dashboard** — embedded ops console: overview page, status/stats/dead-letter
+  JSON APIs, liveness & readiness probes
 - **Observability** — Prometheus metrics + OpenTelemetry (optional, planned)
 
 ## Retry & backoff
@@ -66,6 +68,44 @@ own:
 | [`hooks-results`](./examples/hooks-results) | lifecycle hooks + typed results via `Task[T]` |
 | [`drain`](./examples/drain) | drain-mode shutdown finishes the backlog |
 | [`concurrency`](./examples/concurrency) | `WithMaxConcurrency` caps running handlers |
+| [`dashboard`](./examples/dashboard) | worker + embedded HTTP dashboard on `:8080` |
+
+## Dashboard
+
+The [`dashboard`](./dashboard) subpackage is a zero-dependency embedded
+operations console for a `Client`. It serves an auto-refreshing HTML
+overview plus JSON endpoints, so you get visibility without wiring up a
+metrics stack:
+
+```go
+cli := goqueue.New(goqueue.WithWorkers(4))
+// ... register handlers, Start, Enqueue ...
+
+dash := dashboard.New(cli, dashboard.WithTitle("API Workers"))
+http.Handle("/", dash)
+log.Fatal(http.ListenAndServe(":8080", nil))
+```
+
+| Endpoint | Content |
+|----------|---------|
+| `/` | HTML overview (cards, throughput table, per-type share, DLQ list) |
+| `/api/status` | gauges: `pending`, `running`, `dead`, `workers`, `started`, `uptime_seconds` |
+| `/api/stats` | cumulative counters: `enqueued`, `succeeded`, `failed`, `dead_total`, `by_type` |
+| `/api/jobs` | latest dead-letter jobs (newest first, capped at 50 by default) |
+| `/healthz` | liveness probe — always `200` while the process is up |
+| `/healthz/ready` | readiness probe — `200`, or `503` when a custom check fails |
+
+The counters behind `/api/stats` are maintained by the core `Client`
+itself (`Stats()`, `Running()`), so the dashboard works even when no hooks
+are configured. Mount the console under a path prefix if needed:
+
+```go
+mux := http.NewServeMux()
+mux.Handle("/queue/", http.StripPrefix("/queue/", dash.Handler()))
+```
+
+Options: `WithTitle`, `WithMaxDeadJobs`, `WithRefreshInterval`,
+`WithReadyCheck` (custom readiness probe, e.g. database reachability).
 
 ## Performance
 
@@ -84,5 +124,6 @@ Benchmarks (`go test -bench=. -benchmem ./...`), 2-core Xeon Gold 6148:
 
 ## Status
 
-Under active development (2-week bootcamp, started 2026-08-13). Day 6:
-benchmark suite, API review and runnable examples complete.
+Under active development (2-week bootcamp, started 2026-08-13). Day 7:
+HTTP dashboard (overview page, status/stats/jobs JSON APIs, health probes)
+complete. Day 8: SQLite backend (modernc, pure Go).

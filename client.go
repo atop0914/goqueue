@@ -27,6 +27,18 @@ type Client struct {
 	// inflight counts jobs that have been dequeued but not yet Acked/Nacked.
 	// Drain mode waits for it to reach zero together with an empty queue.
 	inflight atomic.Int64
+	// Monotonic lifecycle counters, exposed via Stats() and consumed by the
+	// dashboard package. They are updated for every event regardless of
+	// whether hooks are configured, so observability does not depend on the
+	// caller wiring up callbacks.
+	enqueued  atomic.Int64
+	succeeded atomic.Int64
+	failed    atomic.Int64
+	deadTotal atomic.Int64
+	// typeCount tracks enqueue counts per job type (key: string, value:
+	// *atomic.Int64). Unbounded by design: job types are a small, finite set
+	// chosen at deployment time.
+	typeCount sync.Map
 }
 
 // New creates a Client with the given options. The default queue is an
@@ -89,7 +101,15 @@ func (c *Client) Enqueue(ctx context.Context, job Job) (string, error) {
 			EnqueuedAt: time.Now(),
 		})
 	}
+	c.countEnqueued(job.Type)
 	return id, nil
+}
+
+// countEnqueued bumps the lifecycle counters after a successful enqueue.
+func (c *Client) countEnqueued(taskType string) {
+	c.enqueued.Add(1)
+	counter, _ := c.typeCount.LoadOrStore(taskType, new(atomic.Int64))
+	counter.(*atomic.Int64).Add(1)
 }
 
 // Start launches the worker pool. It returns immediately; workers run in the
@@ -226,12 +246,14 @@ func (c *Client) process(dj *DequeuedJob) {
 	cancelRun()
 
 	if err == nil {
+		c.succeeded.Add(1)
 		_ = c.cfg.Queue.Ack(context.Background(), dj.ID)
 		if h := c.cfg.Hooks.OnSuccess; h != nil {
 			h(dj.jobInfo(StateSucceeded, "", time.Time{}))
 		}
 		return
 	}
+	c.failed.Add(1)
 	retryable := dj.Attempt <= dj.MaxRetry
 	// Backoff the next attempt: the queue schedules it RunAfter now+delay.
 	delay := c.cfg.RetryBackoff.Delay(dj.Attempt)
@@ -250,6 +272,7 @@ func (c *Client) process(dj *DequeuedJob) {
 	}
 	info.State = StateDead
 	info.DeadAt = time.Now()
+	c.deadTotal.Add(1)
 	if h := c.cfg.Hooks.OnDead; h != nil {
 		h(info)
 	} else if c.cfg.OnDead != nil {

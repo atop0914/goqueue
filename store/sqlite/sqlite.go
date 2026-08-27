@@ -102,7 +102,7 @@ var _ goqueue.Queue = (*Store)(nil)
 // connection is used: the pure-Go driver serializes writes anyway, and one
 // connection rules out cross-connection lock juggling.
 func Open(path string) (*Store, error) {
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)", path)
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=txlock(immediate)", path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("goqueue/sqlite: open %s: %w", path, err)
@@ -110,7 +110,7 @@ func Open(path string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	s := &Store{db: db, notify: make(chan struct{}, 1)}
 	if err := s.init(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	return s, nil
@@ -318,7 +318,7 @@ func (s *Store) Dead() []goqueue.JobInfo {
 	if err != nil {
 		return []goqueue.JobInfo{}
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := []goqueue.JobInfo{}
 	for rows.Next() {
 		var info goqueue.JobInfo
@@ -337,8 +337,30 @@ func (s *Store) Dead() []goqueue.JobInfo {
 
 // Len implements goqueue.Queue: all pending rows, including delayed and
 // awaiting-retry ones — the same population the in-memory heap Len reports.
+// Backed by the context-aware LenContext with a conservative statement
+// timeout, so callers that do not need cancellation still cannot wedge on a
+// contended connection forever.
 func (s *Store) Len() int {
-	return s.queryInt(`SELECT COUNT(*) FROM jobs WHERE state = ?`, int(goqueue.StatePending))
+	return s.LenContext(context.Background())
+}
+
+// LenContext returns the pending-row count, honoring ctx while waiting for
+// the serialized connection. Used by the client's drain probe: under heavy
+// load Len may queue behind every worker; timing out there reports "not
+// drained yet" and the caller retries, so Shutdown never stalls on it.
+func (s *Store) LenContext(ctx context.Context) int {
+	if ctx.Err() != nil {
+		return 1 // unknown: conservatively "work may remain"
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, stmtTimeout)
+	defer cancel()
+	var n int
+	_ = s.db.QueryRowContext(queryCtx,
+		`SELECT COUNT(*) FROM jobs WHERE state = ?`, int(goqueue.StatePending)).Scan(&n)
+	if queryCtx.Err() != nil {
+		return 1 // indeterminate: keep the drain loop going
+	}
+	return n
 }
 
 // Stats reports row counts per lifecycle state. Useful for dashboards and
@@ -401,14 +423,6 @@ func (s *Store) execRows(q string, args ...any) (int64, error) {
 	}
 	n, _ := res.RowsAffected()
 	return n, nil
-}
-
-func (s *Store) queryInt(q string, args ...any) int {
-	var n int
-	ctx, cancel := context.WithTimeout(context.Background(), stmtTimeout)
-	defer cancel()
-	_ = s.db.QueryRowContext(ctx, q, args...).Scan(&n)
-	return n
 }
 
 func (s *Store) withTx(fn func(tx *sql.Tx) error) error {

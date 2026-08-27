@@ -287,8 +287,19 @@ func (c *Client) draining() bool { return c.cfg.DrainOnShutdown }
 // pending jobs and no dequeued-but-unfinished jobs. Only meaningful while
 // draining; callers must hold no assumptions about queue internals.
 func (c *Client) drainDone() bool {
-	return c.inflight.Load() == 0 && c.cfg.Queue.Len() == 0
+	if c.inflight.Load() != 0 {
+		return false
+	}
+	if lq, ok := c.cfg.Queue.(LenAwareQueue); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), drainProbeTimeout)
+		defer cancel()
+		return lq.LenContext(ctx) == 0
+	}
+	return c.cfg.Queue.Len() == 0
 }
+
+// drainProbeTimeout bounds each drain-completion probe against the backend.
+const drainProbeTimeout = 2 * time.Second
 
 // invoke looks up the handler and runs it, recovering from panics.
 func (c *Client) invoke(ctx context.Context, dj *DequeuedJob) (err error) {

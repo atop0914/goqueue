@@ -51,6 +51,15 @@ type Queue interface {
 	Close() error
 }
 
+// LenAwareQueue is an optional interface for backends whose Len honors a
+// context. The client's drain check uses it when available so that a
+// contended embedded backend (e.g. SQLite) cannot wedge Shutdown on an
+// unbounded internal wait: a backend that cannot answer in time may report
+// "not drained" and let the caller retry.
+type LenAwareQueue interface {
+	LenContext(ctx context.Context) int
+}
+
 // DequeuedJob is a job handed to a worker. The worker must Ack or Nack it.
 type DequeuedJob struct {
 	ID         string

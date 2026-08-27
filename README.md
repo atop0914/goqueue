@@ -70,6 +70,44 @@ own:
 | [`concurrency`](./examples/concurrency) | `WithMaxConcurrency` caps running handlers |
 | [`dashboard`](./examples/dashboard) | worker + embedded HTTP dashboard on `:8080` |
 
+## SQLite backend (persistent)
+
+The [`store/sqlite`](./store/sqlite) subpackage adds a durable `Queue`
+implementation on top of an embedded SQLite database, using the pure-Go
+`modernc.org/sqlite` driver — no CGo, no external database process. Drop it in
+via `goqueue.WithQueue` and every job survives a restart:
+
+```go
+import (
+    goqueue "github.com/atop0914/goqueue"
+    "github.com/atop0914/goqueue/store/sqlite"
+)
+
+st, err := sqlite.Open("jobs.db") // created on first run
+if err != nil {
+    log.Fatal(err)
+}
+defer st.CloseDB()
+
+cli := goqueue.New(goqueue.WithQueue(st), goqueue.WithWorkers(4))
+```
+
+Behavior:
+
+- **Crash recovery** — jobs found in `running` state at startup are returned
+  to `pending` immediately; their attempt count is preserved, so the
+  at-least-once contract holds across hard kills.
+- **Same scheduling policy as memory** — ready jobs dequeue by
+  `run_after ASC, priority DESC, seq`; retries reuse the delayed-job path.
+- **Unique jobs** — enforced with a partial unique index; the key is held
+  across retries and released on success or DLQ.
+- **WAL journaling + busy timeout** — safe under concurrent producers and
+  workers on one process.
+
+API notes: `Close()` stops job pickup and unblocks `Dequeue` waiters but
+leaves data readable; `CloseDB()` additionally releases the file handle.
+`Stats()` reports per-state row counts for dashboards.
+
 ## Dashboard
 
 The [`dashboard`](./dashboard) subpackage is a zero-dependency embedded
@@ -124,6 +162,6 @@ Benchmarks (`go test -bench=. -benchmem ./...`), 2-core Xeon Gold 6148:
 
 ## Status
 
-Under active development (2-week bootcamp, started 2026-08-13). Day 7:
-HTTP dashboard (overview page, status/stats/jobs JSON APIs, health probes)
-complete. Day 8: SQLite backend (modernc, pure Go).
+Under active development (2-week bootcamp, started 2026-08-13). Day 8:
+SQLite backend ([`store/sqlite`](./store/sqlite), modernc pure-Go driver,
+crash recovery, unique jobs, WAL) complete.

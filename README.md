@@ -96,13 +96,26 @@ Behavior:
 
 - **Crash recovery** — jobs found in `running` state at startup are returned
   to `pending` immediately; their attempt count is preserved, so the
-  at-least-once contract holds across hard kills.
+  at-least-once contract holds across hard kills. The recovery sweep never
+  resurrects terminal rows: `succeeded`/`dead` (and their `dead_at` /
+  `last_error` metadata) survive restarts untouched, and a delayed row keeps
+  its future `run_after` — it fires late, never early.
+- **Recovery vs. retry budget** — a job whose final fair delivery was killed
+  mid-flight is redelivered once more after restart (at-least-once), and if
+  that attempt fails, the next `Nack` dead-letters it even when the caller
+  labels the error retryable. Poison jobs therefore terminate instead of
+  looping across restarts.
 - **Same scheduling policy as memory** — ready jobs dequeue by
   `run_after ASC, priority DESC, seq`; retries reuse the delayed-job path.
 - **Unique jobs** — enforced with a partial unique index; the key is held
-  across retries and released on success or DLQ.
-- **WAL journaling + busy timeout** — safe under concurrent producers and
-  workers on one process.
+  across retries *and across crashes* (a recovered keyed job still blocks
+  duplicates) and is released on success or DLQ.
+- **WAL journaling + busy timeout + immediate transactions** — write
+  transactions take the write lock up front (`txlock=IMMEDIATE`), avoiding
+  lock-upgrade busy storms; safe under concurrent producers and workers in
+  one process. Throughput baseline on a 2-core Xeon (file mode): Enqueue
+  ≈0.1–0.4 ms/op, Dequeue+Ack ≈0.6–1.5 ms/op; per-op cost grows slowly with
+  accumulated terminal rows in the same table.
 
 API notes: `Close()` stops job pickup and unblocks `Dequeue` waiters but
 leaves data readable; `CloseDB()` additionally releases the file handle.

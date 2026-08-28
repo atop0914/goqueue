@@ -121,6 +121,56 @@ API notes: `Close()` stops job pickup and unblocks `Dequeue` waiters but
 leaves data readable; `CloseDB()` additionally releases the file handle.
 `Stats()` reports per-state row counts for dashboards.
 
+## Redis backend (distributed)
+
+The [`store/redis`](./store/redis) subpackage adds a distributed `Queue`
+implementation on top of Redis (via `github.com/redis/go-redis/v9`). Where
+SQLite coordinates one process, Redis coordinates many: several application
+instances can share one queue safely. Tests use miniredis (an in-process
+server), so trying the backend out needs no Docker either:
+
+```go
+import (
+    goqueue "github.com/atop0914/goqueue"
+    "github.com/atop0914/goqueue/store/redis"
+)
+
+st, err := redis.Open("localhost:6379") // options: WithQueue, WithPassword, WithDB
+if err != nil {
+    log.Fatal(err)
+}
+defer st.CloseClient()
+
+cli := goqueue.New(goqueue.WithQueue(st), goqueue.WithWorkers(4))
+```
+
+Behavior:
+
+- **Atomic everywhere** — unique-key claim, ready-queue claim, ack and
+  nack/retry/DLQ routing each run as a Lua script, so concurrent consumers —
+  in one process or across a fleet — can never interleave a read and write of
+  the same key. Jobs are never double-claimed and unique keys never slip.
+- **Same scheduling policy as memory and SQLite** — ready jobs dequeue by
+  `run_after ASC, priority DESC, seq`. The ready set is one ZSET scored by
+  run-after (ms) minus a clamped priority (±499); the zero-padded seq inside
+  the member breaks remaining ties. Priorities beyond ±499 are clamped, not
+  rejected.
+- **Crash recovery** — jobs found in the `running` set at startup are
+  returned to the ready queue immediately with their attempt count preserved
+  (at-least-once across hard kills). Unique keys held by crashed jobs stay
+  held until a real ack or DLQ releases them.
+- **Unique jobs** — claimed `SETNX`-style inside the enqueue script; the key
+  is held across retries and crashes, released on success or DLQ.
+- **Multi-queue namespaces** — `redis.Open(addr, redis.WithQueue("orders"))`
+  keys everything under `goqueue:orders:*`, so independent queues share one
+  Redis server without seeing each other's jobs.
+
+API notes mirror the SQLite backend: `Close()` stops job pickup and unblocks
+`Dequeue` waiters but leaves all data in Redis; `CloseClient()` additionally
+closes the connection. `Stats()` reports pending/running/succeeded/dead
+counts. `Len` is context-aware (implements `LenAwareQueue`) like SQLite, so
+the client's drain probe cannot wedge shutdown.
+
 ## Dashboard
 
 The [`dashboard`](./dashboard) subpackage is a zero-dependency embedded
@@ -172,9 +222,17 @@ Benchmarks (`go test -bench=. -benchmem ./...`), 2-core Xeon Gold 6148:
 | Client, hooks attached | ~3.5µs | 557 | 7 |
 | Drain lifecycle (64 jobs, 4 workers) | ~3.9µs/job | — | — |
 | Backoff schedule (`Delay`) | ~43ns | 0 | 0 |
+| Redis Enqueue (miniredis) | ~0.6ms | 208k | 854 |
+| Redis Dequeue + Ack (miniredis) | ~1.1ms | 488k | 1786 |
+
+Redis numbers are miniredis-based, i.e. the in-process Lua-script cost with
+the network round-trip excluded; against a real server add one loopback RTT
+per operation (two scripts for the Dequeue+Ack pair). SQLite baselines:
+Enqueue ≈0.1–0.4 ms/op, Dequeue+Ack ≈0.6–1.5 ms/op (file mode, see above).
 
 ## Status
 
-Under active development (2-week bootcamp, started 2026-08-13). Day 8:
-SQLite backend ([`store/sqlite`](./store/sqlite), modernc pure-Go driver,
-crash recovery, unique jobs, WAL) complete.
+Under active development (2-week bootcamp, started 2026-08-13). Day 10:
+Redis backend ([`store/redis`](./store/redis), go-redis v9 + atomic Lua
+lifecycle scripts, miniredis test suite) complete. All three backends —
+memory, SQLite, Redis — now share one `Queue` contract.

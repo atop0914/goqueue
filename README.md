@@ -31,7 +31,7 @@ id, err := q.Enqueue(ctx, goqueue.Job{
   shutdown (`WithDrainOnShutdown`), panic recovery
 - **HTTP dashboard** — embedded ops console: overview page, status/stats/dead-letter
   JSON APIs, liveness & readiness probes
-- **Observability** — Prometheus metrics + OpenTelemetry (optional, planned)
+- **Observability** — Prometheus metrics + OpenTelemetry tracing (optional extension modules)
 
 ## Retry & backoff
 
@@ -171,6 +171,67 @@ closes the connection. `Stats()` reports pending/running/succeeded/dead
 counts. `Len` is context-aware (implements `LenAwareQueue`) like SQLite, so
 the client's drain probe cannot wedge shutdown.
 
+## Observability
+
+Two optional extension modules add Prometheus metrics and OpenTelemetry
+tracing. Both live outside the core module, so importers who do not need
+them never pull the dependencies.
+
+### Prometheus metrics (`obs/metrics`)
+
+```go
+import (
+    "net/http"
+
+    goqueue "github.com/atop0914/goqueue"
+    "github.com/atop0914/goqueue/obs/metrics"
+)
+
+col := metrics.NewCollector(metrics.Options{Namespace: "goqueue"})
+client := goqueue.New(goqueue.WithHooks(col.Hooks()))
+col.Watch(client) // queue_depth / jobs_running / dead_jobs gauges
+
+http.Handle("/metrics", col.Handler()) // Prometheus text format
+```
+
+Hook wiring produces `jobs_enqueued_total`, `jobs_succeeded_total`,
+`jobs_failed_total`, `jobs_retried_total` and `jobs_dead_total` counters
+(per job `type`) plus the `job_duration_seconds` end-to-end histogram;
+`Watch(client)` registers pull-based gauges backed by `client.Stats()` on
+every scrape. Use `goqueue.CombineHooks` when you also need your own hooks.
+
+### OpenTelemetry tracing (`obs/tracing`)
+
+```go
+import (
+    goqueue "github.com/atop0914/goqueue"
+    "github.com/atop0914/goqueue/obs/tracing"
+)
+
+tr := tracing.NewTracer(tracing.Options{ServiceName: "workers"})
+reg := tracing.NewRegistry()
+defer reg.Close()
+
+client := goqueue.New(
+    goqueue.WithHooks(tr.Hooks(reg)),
+    goqueue.WithContextDecorator(tr.ContextDecorator(reg)),
+)
+```
+
+Each job gets one end-to-end `goqueue.process` span: started at enqueue,
+kept open across retries and waits, finished when the job succeeds (OK) or
+lands in the dead-letter queue (error, with `goqueue.retry` and
+`goqueue.dead_letter` events). Producer-side spans join an existing request
+trace and, via `StartJobSpan` + `WithContextDecorator`, become the parent
+context of handler invocations so spans emitted inside handlers nest
+correctly:
+
+```go
+ctx, span := tr.StartJobSpan(reg, ctx, "emails", emailJobID)
+defer span.End()
+_, err := client.Enqueue(ctx, goqueue.Job{ID: emailJobID, Type: "emails"})
+```
+
 ## Dashboard
 
 The [`dashboard`](./dashboard) subpackage is a zero-dependency embedded
@@ -232,7 +293,10 @@ Enqueue ≈0.1–0.4 ms/op, Dequeue+Ack ≈0.6–1.5 ms/op (file mode, see above
 
 ## Status
 
-Under active development (2-week bootcamp, started 2026-08-13). Day 10:
-Redis backend ([`store/redis`](./store/redis), go-redis v9 + atomic Lua
-lifecycle scripts, miniredis test suite) complete. All three backends —
-memory, SQLite, Redis — now share one `Queue` contract.
+Under active development (2-week bootcamp, started 2026-08-13). Day 11:
+observability extensions complete — [`obs/metrics`](./obs/metrics)
+(Prometheus text-format counters, histograms and pull-based queue gauges)
+and [`obs/tracing`](./obs/tracing) (OpenTelemetry end-to-end job spans with
+retry/dead-letter events). Core gained `CombineHooks`,
+`WithContextDecorator` and `JobIDFromContext` as the zero-dependency
+integration seams.

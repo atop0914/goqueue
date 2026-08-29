@@ -1,6 +1,7 @@
 package goqueue
 
 import (
+	"context"
 	"time"
 )
 
@@ -40,6 +41,10 @@ type Config struct {
 	// default behavior of only waiting for the handlers currently running
 	// and leaving the rest pending for the next Start.
 	DrainOnShutdown bool
+	// ContextDecorator, when non-nil, wraps the context handed to every
+	// handler invocation. Set via WithContextDecorator; see that function
+	// for details.
+	ContextDecorator func(ctx context.Context) context.Context
 	// now is the clock used by time-dependent features (scheduler). Defaults
 	// to time.Now. Mostly for tests.
 	now func() time.Time
@@ -122,4 +127,14 @@ func WithClock(now func() time.Time) Option {
 			c.now = now
 		}
 	}
+}
+
+// WithContextDecorator registers a decorator applied to the context handed
+// to every handler invocation, after the per-attempt timeout and job-ID
+// values are attached. It is the integration point for observability
+// packages that propagate tracing context into handlers (see
+// obs/tracing.WithTracing) without the core depending on any
+// observability library. Nil or nil-returning decorators are ignored.
+func WithContextDecorator(dec func(ctx context.Context) context.Context) Option {
+	return func(c *Config) { c.ContextDecorator = dec }
 }

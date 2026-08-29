@@ -61,3 +61,45 @@ func (dj *DequeuedJob) jobInfo(state JobState, lastErr string, deadAt time.Time)
 		DeadAt:     deadAt,
 	}
 }
+
+// --- Observability extensions (Day 11) -------------------------------------
+//
+// The hooks above are the only job-lifecycle integration point in the core.
+// The optional observability packages (obs/metrics, obs/tracing) are built
+// entirely on these hooks plus the two helpers below: CombineHooks lets one
+// logical hook slot fan out to multiple consumers, and WithContextDecorator
+// (options.go) gives the tracing package a way to attach context values to
+// handler invocations without the core depending on any observability
+// library.
+
+// Hook is the signature of the job-lifecycle callbacks stored in Hooks.
+type Hook = func(JobInfo)
+
+// CombineHooks merges any number of Hooks into a single Hooks value. Within
+// a slot the constituent callbacks run in order: OnSuccess of hooks[0]
+// completes before OnSuccess of hooks[1] starts. Nil callbacks inside any
+// constituent value are skipped, so combining a value that only sets
+// OnEnqueue with one that only sets OnDead preserves both events. Every
+// slot of the merged value is non-nil and safe for concurrent use as long
+// as the underlying callbacks are.
+func CombineHooks(hooks ...Hooks) Hooks {
+	return Hooks{
+		OnEnqueue: chainHooks(func(h Hooks) Hook { return h.OnEnqueue }, hooks),
+		OnSuccess: chainHooks(func(h Hooks) Hook { return h.OnSuccess }, hooks),
+		OnFailure: chainHooks(func(h Hooks) Hook { return h.OnFailure }, hooks),
+		OnRetry:   chainHooks(func(h Hooks) Hook { return h.OnRetry }, hooks),
+		OnDead:    chainHooks(func(h Hooks) Hook { return h.OnDead }, hooks),
+	}
+}
+
+// chainHooks returns a callback that invokes every non-nil slot callback
+// across hooks in order. The returned callback is never nil.
+func chainHooks(pick func(Hooks) Hook, hooks []Hooks) Hook {
+	return func(info JobInfo) {
+		for _, h := range hooks {
+			if fn := pick(h); fn != nil {
+				fn(info)
+			}
+		}
+	}
+}

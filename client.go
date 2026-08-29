@@ -241,6 +241,13 @@ func (c *Client) process(dj *DequeuedJob) {
 		runCtx, cancelRun = context.WithTimeout(runCtx, dj.Timeout)
 	}
 	runCtx = context.WithValue(runCtx, jobIDKey{}, dj.ID)
+	// Observability hook: let a configured decorator (e.g. the tracing
+	// package) inject its values before the handler sees the context.
+	if dec := c.cfg.ContextDecorator; dec != nil {
+		if decorated := dec(runCtx); decorated != nil {
+			runCtx = decorated
+		}
+	}
 
 	err := c.invoke(runCtx, dj)
 	cancelRun()

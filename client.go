@@ -220,6 +220,19 @@ func (c *Client) worker(id int) {
 	}
 }
 
+// JobIDFromContext returns the ID of the job whose handler invocation this
+// context belongs to. The value is attached by the worker pool before the
+// registered handler runs; ok is false outside handler execution (or when
+// the context did not come from a worker). Handlers can use it instead of
+// re-parsing the payload, and observability decorators key their state on
+// it (see obs/tracing).
+func JobIDFromContext(ctx context.Context) (string, bool) {
+	if v, ok := ctx.Value(jobIDKey{}).(string); ok && v != "" {
+		return v, true
+	}
+	return "", false
+}
+
 // process runs one dequeued job through the semaphore (if configured), the
 // registered handler and the ack/nack + hooks flow. It is called by workers;
 // panics inside handlers are recovered by invoke and surface as errors here,

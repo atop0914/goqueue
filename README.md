@@ -257,6 +257,21 @@ log.Fatal(http.ListenAndServe(":8080", nil))
 | `/healthz` | liveness probe — always `200` while the process is up |
 | `/healthz/ready` | readiness probe — `200`, or `503` when a custom check fails |
 
+Admin endpoints (POST only — a GET answers `405`; unsupported backend
+capabilities answer `501`):
+
+| Endpoint | Effect |
+|----------|--------|
+| `POST /api/admin/pause` | stop job delivery (workers idle, jobs retained) |
+| `POST /api/admin/resume` | lift a pause |
+| `POST /api/admin/purge` | drop pending jobs; body `{"dead":true}` also drops the DLQ |
+| `POST /api/admin/requeue-dead` | requeue the whole DLQ; body `{"id":"..."}` requeues one job |
+
+Requeued jobs restart with a fresh retry budget (attempts reset, errors
+cleared, due immediately). A job whose unique key is held by another
+in-flight job stays dead (`409` for the single-job form). The overview page
+ships with an admin button row wired to these endpoints.
+
 The counters behind `/api/stats` are maintained by the core `Client`
 itself (`Stats()`, `Running()`), so the dashboard works even when no hooks
 are configured. Mount the console under a path prefix if needed:
@@ -268,6 +283,40 @@ mux.Handle("/queue/", http.StripPrefix("/queue/", dash.Handler()))
 
 Options: `WithTitle`, `WithMaxDeadJobs`, `WithRefreshInterval`,
 `WithReadyCheck` (custom readiness probe, e.g. database reachability).
+
+## Admin operations (programmatic)
+
+All dashboard admin endpoints are thin wrappers over the `Client` API —
+use it directly for maintenance tooling, tests or ops scripts:
+
+```go
+cli.Pause()                          // delivery stops; enqueues still accepted
+// ... maintenance window: drain, deploy, inspect ...
+cli.Resume()
+
+n, _ := cli.Purge(ctx, false)        // drop pending jobs (unique keys released)
+n, _ := cli.Purge(ctx, true)         // ... and the dead-letter set
+n, _ := cli.RequeueDead(ctx)         // requeue the whole DLQ, attempts reset
+_ = cli.RequeueDeadJob(ctx, id)      // cherry-pick one dead job
+```
+
+Operations are optional capabilities the backend may implement
+(`goqueue.AdminQueue` = `Pauser` + `Purger` + `DeadRequeuer`); all three
+built-in backends (memory, SQLite, Redis) implement the full set. A backend
+without a capability makes the matching `Client` method return
+`ErrAdminUnsupported`, so custom `Queue` implementations stay compatible.
+
+Semantic notes:
+
+- **Pause** is per-process (memory and Redis: local flag; SQLite: runtime
+  flag surviving nothing) — a restarted process resumes delivery; enqueued
+  jobs and their priorities/retry schedules are retained verbatim.
+- **Purge** never touches running jobs; purged jobs' unique keys are
+  released, so the same work can be re-enqueued. Idempotent.
+- **RequeueDead / RequeueDeadJob** reset attempts to zero and clear
+  `last_error`/`dead_at`; a dead job whose unique key is held by another
+  live job stays dead (`ErrJobExists` for the single-job form, silently
+  skipped for the wholesale form).
 
 ## Performance
 
@@ -293,10 +342,9 @@ Enqueue ≈0.1–0.4 ms/op, Dequeue+Ack ≈0.6–1.5 ms/op (file mode, see above
 
 ## Status
 
-Under active development (2-week bootcamp, started 2026-08-13). Day 11:
-observability extensions complete — [`obs/metrics`](./obs/metrics)
-(Prometheus text-format counters, histograms and pull-based queue gauges)
-and [`obs/tracing`](./obs/tracing) (OpenTelemetry end-to-end job spans with
-retry/dead-letter events). Core gained `CombineHooks`,
-`WithContextDecorator` and `JobIDFromContext` as the zero-dependency
-integration seams.
+Under active development (2-week bootcamp, started 2026-08-13). Day 12
+added queue administration: `Pause`/`Resume`, `Purge` and
+`RequeueDead`/`RequeueDeadJob` as optional backend capabilities
+(`goqueue.AdminQueue`), implemented by all three built-in backends, plus
+POST admin endpoints and an admin button row in the
+[`dashboard`](./dashboard) console.

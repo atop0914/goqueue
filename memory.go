@@ -23,8 +23,11 @@ type InMemoryQueue struct {
 	unique   map[string]string // UniqueKey -> job ID while that key is held
 	seq      uint64
 	closed   bool
-	notify   chan struct{}
-	now      func() time.Time
+	// paused stops Dequeue from delivering jobs. Pending jobs are retained
+	// verbatim; blocked callers wait until Resume, Close, or ctx cancel.
+	paused bool
+	notify chan struct{}
+	now    func() time.Time
 }
 
 // NewInMemoryQueue creates an empty in-memory queue.
@@ -85,6 +88,18 @@ func (q *InMemoryQueue) Dequeue(ctx context.Context) (*DequeuedJob, error) {
 		if q.closed && q.heap.Len() == 0 {
 			q.mu.Unlock()
 			return nil, ErrQueueClosed
+		}
+		// While paused, nothing is delivered — not even after Close (a
+		// paused queue still holds its jobs for later). Waiters block here
+		// until Resume lifts the pause.
+		if q.paused {
+			q.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-q.notify:
+			}
+			continue
 		}
 		if q.heap.Len() > 0 {
 			top := q.heap[0]

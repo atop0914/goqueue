@@ -92,6 +92,10 @@ type Store struct {
 
 	// notify wakes idle Dequeue pollers on arrival; buffer of 1 coalesces.
 	notify chan struct{}
+
+	// paused stops Dequeue from claiming jobs (admin Pause). Runtime-only:
+	// a restarted process starts unpaused. See admin.go.
+	paused atomic.Bool
 }
 
 var _ goqueue.Queue = (*Store)(nil)
@@ -180,11 +184,15 @@ func (s *Store) Dequeue(ctx context.Context) (*goqueue.DequeuedJob, error) {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if dj, ok := s.claim(); ok {
-			return dj, nil
-		}
 		if s.closed.Load() {
 			return nil, ErrQueueClosed
+		}
+		// While paused, no jobs are claimed; pollers keep waiting until
+		// Resume lifts the pause (or the caller's context expires).
+		if !s.paused.Load() {
+			if dj, ok := s.claim(); ok {
+				return dj, nil
+			}
 		}
 		timer := time.NewTimer(pollInterval)
 		select {

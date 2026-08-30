@@ -1,8 +1,9 @@
 // Package dashboard provides an embedded HTTP operations console for a
 // goqueue Client: a lightweight HTML overview page, JSON API endpoints for
-// status/stats/dead-letter inspection, and liveness/readiness probes. It
-// has zero external dependencies (stdlib only) and is safe to mount under
-// any path of an existing HTTP server.
+// status/stats/dead-letter inspection, admin operations (pause, purge,
+// requeue dead-letter jobs) and liveness/readiness probes. It has zero
+// external dependencies (stdlib only) and is safe to mount under any path
+// of an existing HTTP server.
 //
 //	cli := goqueue.New()
 //	dash := dashboard.New(cli, dashboard.WithTitle("My Worker"))
@@ -11,12 +12,22 @@
 //
 // Endpoints:
 //
-//	/            HTML overview (auto-refreshing)
+//	/            HTML overview (auto-refreshing, with admin buttons)
 //	/api/status  JSON: queue depth gauges (pending/running/dead, workers)
 //	/api/stats   JSON: cumulative lifecycle counters + per-type breakdown
 //	/api/jobs    JSON: recent dead-letter jobs
+//	POST /api/admin/pause        pause job delivery
+//	POST /api/admin/resume       lift a pause
+//	POST /api/admin/purge        drop pending jobs; JSON body {"dead":true}
+//	                             also drops the DLQ
+//	POST /api/admin/requeue-dead requeue the DLQ; JSON body {"id":"..."}
+//	                             requeues a single job
 //	/healthz       liveness probe (always 200 while the process is up)
 //	/healthz/ready readiness probe (200, or 503 when a custom check fails)
+//
+// Admin endpoints answer POST only; a GET returns 405. Unsupported
+// operations (backend without the matching capability) answer 501 with
+// {"ok":false,"error":...}.
 package dashboard
 
 import (
@@ -107,6 +118,10 @@ func New(cli *goqueue.Client, opts ...Option) *Dashboard {
 	mux.HandleFunc("/api/status", d.handleStatus)
 	mux.HandleFunc("/api/stats", d.handleStats)
 	mux.HandleFunc("/api/jobs", d.handleJobs)
+	mux.HandleFunc("POST /api/admin/pause", d.handlePause)
+	mux.HandleFunc("POST /api/admin/resume", d.handleResume)
+	mux.HandleFunc("POST /api/admin/purge", d.handlePurge)
+	mux.HandleFunc("POST /api/admin/requeue-dead", d.handleRequeueDead)
 	mux.HandleFunc("/healthz", d.handleLiveness)
 	mux.HandleFunc("/healthz/ready", d.handleReadiness)
 	d.mux = mux
@@ -347,6 +362,11 @@ var overviewTemplate = template.Must(template.New("overview").Parse(`<!DOCTYPE h
   .err { color: #c0392b; font-family: ui-monospace, monospace; font-size: 12px; }
   .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; }
   .pill.running { background: #e8f0fe; color: #1a6feb; }
+  .admin { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .admin button { padding: 6px 14px; border: 1px solid #cfd6de; border-radius: 8px;
+                  background: #fff; font-size: 13px; cursor: pointer; }
+  .admin button:hover { background: #f0f4f8; }
+  #admin-msg { font-size: 12px; color: #6b7787; font-family: ui-monospace, monospace; }
   .badge { display:inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight:600; }
   .badge.on { background: #e4f5e9; color: #1e7c3a; }
   .badge.off { background: #fdecec; color: #c0392b; }
@@ -404,8 +424,31 @@ var overviewTemplate = template.Must(template.New("overview").Parse(`<!DOCTYPE h
   {{end}}
 </table>
 
+<h2>Admin</h2>
+<div class="admin">
+  <button id="b-pause" onclick="admin('pause')">Pause</button>
+  <button id="b-resume" onclick="admin('resume')">Resume</button>
+  <button onclick="admin('purge')">Purge pending</button>
+  <button onclick="admin('purge', {dead: true})">Purge pending + DLQ</button>
+  <button onclick="admin('requeue-dead', {all: true})">Requeue DLQ</button>
+  <span id="admin-msg"></span>
+</div>
+
 <script>
 const refreshMs = {{.RefreshMillis}};
+async function admin(op, body) {
+  const msg = document.getElementById('admin-msg');
+  try {
+    const resp = await fetch('/api/admin/' + op, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await resp.json();
+    msg.textContent = data.ok ? ('ok: ' + JSON.stringify(data)) : ('error: ' + data.error);
+    if (data.ok) tick();
+  } catch (e) { msg.textContent = 'error: ' + e; }
+}
 async function tick() {
   try {
     const [status, stats] = await Promise.all([

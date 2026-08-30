@@ -168,12 +168,73 @@ redis.call('ZADD', KEYS[1], tonumber(ARGV[2]) * 1000 - prio, member)
 return 1
 `
 
+// KEYS: dead, ready, job:<id>, unique. ARGV: id, now_ms.
+// Returns 0 when the id is not in the dead set, 2 when the unique key is
+// held by another job (job stays dead), 1 on success. Resets attempts,
+// clears last_error/dead_at and makes the job due immediately (score base
+// 0 minus priority, matching the enqueue scoring); the unique key (if any)
+// is re-claimed atomically via HSETNX.
+const luaRequeueDead = `
+if redis.call('ZREM', KEYS[1], ARGV[1]) == 0 then return 0 end
+local jk = KEYS[3]
+local ukey = redis.call('HGET', jk, 'ukey') or ''
+if ukey ~= '' and redis.call('HSETNX', KEYS[4], ukey, ARGV[1]) == 0 then
+  redis.call('ZADD', KEYS[1], tonumber(ARGV[2]), ARGV[1])
+  return 2
+end
+redis.call('HSET', jk, 'attempts', '0', 'last_error', '', 'dead_at', '0')
+local prio = tonumber(redis.call('HGET', jk, 'priority') or '0')
+if prio > 499 then prio = 499 elseif prio < -499 then prio = -499 end
+local seq = tonumber(redis.call('HGET', jk, 'seq') or '0')
+local member = string.format('%019d', seq) .. '|' .. ARGV[1]
+redis.call('ZADD', KEYS[2], -prio, member)
+return 1
+`
+
+// KEYS: ready, dead, unique. ARGV: job-key-prefix, dead_flag.
+// Deletes all ready members (and, with the flag set, all dead members),
+// releasing the unique keys of purged jobs. Running jobs are untouched.
+// Returns the number of jobs removed.
+const luaPurge = `
+local n = 0
+local members = redis.call('ZRANGE', KEYS[1], 0, -1)
+for _, m in ipairs(members) do
+  local pos = string.find(m, '|', 1, true)
+  local id = string.sub(m, pos + 1)
+  local jk = ARGV[1] .. id
+  local ukey = redis.call('HGET', jk, 'ukey') or ''
+  if ukey ~= '' and redis.call('HGET', KEYS[3], ukey) == id then
+    redis.call('HDEL', KEYS[3], ukey)
+  end
+  redis.call('DEL', jk)
+end
+n = n + #members
+redis.call('DEL', KEYS[1])
+if ARGV[2] == '1' then
+  local dead = redis.call('ZRANGE', KEYS[2], 0, -1)
+  for _, id in ipairs(dead) do
+    local jk = ARGV[1] .. id
+    local ukey = redis.call('HGET', jk, 'ukey') or ''
+    if ukey ~= '' and redis.call('HGET', KEYS[3], ukey) == id then
+      redis.call('HDEL', KEYS[3], ukey)
+    end
+    redis.call('DEL', jk)
+  end
+  n = n + #dead
+  redis.call('DEL', KEYS[2])
+end
+return n
+`
+
 var (
 	enqueueScript = redis.NewScript(luaEnqueue)
 	claimScript   = redis.NewScript(luaClaim)
 	ackScript     = redis.NewScript(luaAck)
 	nackScript    = redis.NewScript(luaNack)
 	requeueScript = redis.NewScript(luaRequeue)
+
+	purgeScript       = redis.NewScript(luaPurge)
+	requeueDeadScript = redis.NewScript(luaRequeueDead)
 )
 
 // Option configures Open.
@@ -215,6 +276,11 @@ type Store struct {
 
 	closed   atomic.Bool // Close: stop claiming, wake waiters
 	connDown atomic.Bool // CloseClient: connection closed, Enqueue fails too
+
+	// paused stops Dequeue from claiming jobs (admin Pause). Local runtime
+	// flag, deliberately NOT shared through Redis: pausing one consumer
+	// must not pause independent consumers of the same queue. See admin.go.
+	paused atomic.Bool
 
 	// notify wakes idle Dequeue pollers on local arrivals; buffer of 1
 	// coalesces.
@@ -314,9 +380,15 @@ func (s *Store) Dequeue(ctx context.Context) (*goqueue.DequeuedJob, error) {
 		if s.closed.Load() {
 			return nil, goqueue.ErrQueueClosed
 		}
-		dj, err := s.claim(ctx)
-		if err != nil {
-			return nil, err
+		// While paused, no jobs are claimed; pollers keep waiting until
+		// Resume lifts the pause (or the caller's context expires).
+		var dj *goqueue.DequeuedJob
+		var err error
+		if !s.paused.Load() {
+			dj, err = s.claim(ctx)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if dj != nil {
 			return dj, nil

@@ -134,10 +134,13 @@ func (s *Store) RequeueDeadJob(_ context.Context, id string) error {
 		if err != nil {
 			return err
 		}
+		// NOTE: with a contested key this UPDATE is the one that violates
+		// the partial unique index (the row re-enters it the moment state
+		// leaves the dead range while still holding unique_key).
 		if _, err := tx.Exec(`UPDATE jobs
 			SET state = ?, attempts = 0, last_error = '', dead_at = 0, run_after = 0
 			WHERE id = ?`, int(goqueue.StatePending), id); err != nil {
-			return err
+			return translate(err)
 		}
 		if ukey != "" {
 			// Re-claim last: a violation here aborts the whole transaction,

@@ -78,6 +78,22 @@ CREATE INDEX IF NOT EXISTS idx_jobs_ready ON jobs(run_after, priority DESC, seq)
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_unique ON jobs(unique_key) WHERE unique_key != '';
 `
 
+// Migrations applied after schema creation, idempotently. Kept separate from
+// schema so each step is auditable.
+//
+// v2 (2026-08, admin operations): dead jobs keep their unique_key column so
+// RequeueDeadJob can re-claim the key and detect contention (matching the
+// memory and Redis backends). The unique index gains `AND state != 4`
+// (4 = StateDead) so a dead row still holding the column does not block
+// fresh enqueues — death releases the key for the living, while preserving
+// the information for admin requeues. Older databases carry the v1 index;
+// it is dropped and recreated in the new form.
+const migrationV2 = `
+DROP INDEX IF EXISTS idx_jobs_unique;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_unique
+	ON jobs(unique_key) WHERE unique_key != '' AND state != 4;
+`
+
 // Store is a SQLite-backed implementation of goqueue.Queue.
 //
 // Ready jobs are dequeued in (run_after ASC, priority DESC, seq ASC) order,
@@ -123,6 +139,11 @@ func Open(path string) (*Store, error) {
 func (s *Store) init() error {
 	if _, err := s.exec(schema); err != nil {
 		return fmt.Errorf("goqueue/sqlite: schema: %w", err)
+	}
+	// v2 migration: recreate the unique index so dead rows may keep their
+	// unique_key (see migrationV2). Idempotent.
+	if _, err := s.exec(migrationV2); err != nil {
+		return fmt.Errorf("goqueue/sqlite: migration v2: %w", err)
 	}
 	// Crash recovery: the previous process died holding running jobs. They
 	// were dequeued but never acked/nacked, so under at-least-once they must
@@ -306,11 +327,10 @@ func (s *Store) Nack(_ context.Context, id string, err error, retryable bool, de
 				int(goqueue.StatePending), msg, runAfter, id)
 			return e
 		}
-		if ukey != "" {
-			if _, e = tx.Exec(`UPDATE jobs SET unique_key = '' WHERE id = ?`, id); e != nil {
-				return e
-			}
-		}
+		// DLQ. The unique_key column is deliberately KEPT: the partial unique
+		// index excludes dead rows (migration v2), so keeping the value does not
+		// block fresh enqueues, while RequeueDeadJob needs it to re-claim the
+		// key and detect contention — matching the memory/Redis backends.
 		_, e = tx.Exec(`UPDATE jobs SET state = ?, last_error = ?, dead_at = ? WHERE id = ?`,
 			int(goqueue.StateDead), msg, time.Now().UnixNano(), id)
 		return e

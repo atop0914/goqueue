@@ -122,6 +122,13 @@ func New(cli *goqueue.Client, opts ...Option) *Dashboard {
 	mux.HandleFunc("POST /api/admin/resume", d.handleResume)
 	mux.HandleFunc("POST /api/admin/purge", d.handlePurge)
 	mux.HandleFunc("POST /api/admin/requeue-dead", d.handleRequeueDead)
+	// Method mismatch on the admin paths answers 405 (not the overview's
+	// 404): register explicit GET/others fallbacks for each admin route.
+	for _, p := range []string{
+		"/api/admin/pause", "/api/admin/resume", "/api/admin/purge", "/api/admin/requeue-dead",
+	} {
+		mux.HandleFunc(p, methodNotAllowed)
+	}
 	mux.HandleFunc("/healthz", d.handleLiveness)
 	mux.HandleFunc("/healthz/ready", d.handleReadiness)
 	d.mux = mux

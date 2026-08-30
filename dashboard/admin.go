@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/atop0914/goqueue"
@@ -50,6 +51,20 @@ func writeAdminError(w http.ResponseWriter, code int, err error) {
 func writeAdminJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// methodNotAllowed answers 405 for admin endpoints hit with a method other
+// than POST (e.g. a GET from a prefetcher). The Allow header advertises the
+// supported method.
+func methodNotAllowed(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		// POST fell through here only when the pattern-specific handler was
+		// not registered (cannot happen with the current routes).
+		writeAdminError(w, http.StatusNotFound, errors.New("not found"))
+		return
+	}
+	w.Header().Set("Allow", http.MethodPost)
+	writeAdminError(w, http.StatusMethodNotAllowed, errors.New("method "+r.Method+" not allowed"))
 }
 
 // requirePost rejects non-POST (and non-HEAD for symmetric mux behavior)

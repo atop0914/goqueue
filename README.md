@@ -54,6 +54,25 @@ The `OnDead` callback receives the full job snapshot (attempts, last error,
 enqueue/death timestamps), and `Queue().Dead()` lists the DLQ ordered by
 death time.
 
+## Quick start
+
+Memory backend needs zero setup. Copy this into `main.go`, run
+`go mod init github.com/atop0914/goqueue && go mod tidy && go run .`:
+
+```go
+q := goqueue.New(goqueue.WithWorkers(4))
+q.Register("email", func(ctx context.Context, payload []byte) error {
+    // send email...
+    return nil
+})
+q.Start()
+
+id, err := q.Enqueue(ctx, goqueue.Job{
+    Type:    "email",
+    Payload: []byte(`{"to":"user@example.com"}`),
+})
+```
+
 ## Examples
 
 Run any of them directly (`go run ./examples/<name>`); each completes on its
@@ -122,6 +141,13 @@ API notes: `Close()` stops job pickup and unblocks `Dequeue` waiters but
 leaves data readable; `CloseDB()` additionally releases the file handle.
 `Stats()` reports per-state row counts for dashboards.
 
+Admin operations: the built-in store implements the full `AdminQueue`
+surface (`Pause`/`Resume`, `Purge`, `RequeueDead`/`RequeueDeadJob`) via
+runtime flags and atomic SQL transactions. `Pause` is a process-local flag
+(it does not survive a restart); `Purge` releases unique keys of removed
+pending jobs; `RequeueDeadJob` re-claims the unique key and returns
+`ErrJobExists` when another in-flight job holds it.
+
 ## Redis backend (distributed)
 
 The [`store/redis`](./store/redis) subpackage adds a distributed `Queue`
@@ -171,6 +197,12 @@ API notes mirror the SQLite backend: `Close()` stops job pickup and unblocks
 closes the connection. `Stats()` reports pending/running/succeeded/dead
 counts. `Len` is context-aware (implements `LenAwareQueue`) like SQLite, so
 the client's drain probe cannot wedge shutdown.
+
+Admin operations: the Redis store also implements the full `AdminQueue`
+surface, but with one deliberate difference from SQLite — `Pause` is a
+local flag that is **not** shared through Redis. Pausing one consumer does
+not pause other instances; `Purge` and `RequeueDead*` run as single Lua
+scripts so they remain atomic across the fleet.
 
 ## Observability
 
@@ -318,6 +350,24 @@ Semantic notes:
   `last_error`/`dead_at`; a dead job whose unique key is held by another
   live job stays dead (`ErrJobExists` for the single-job form, silently
   skipped for the wholesale form).
+
+## Production checklist
+
+- **Backend choice** — memory mode is for tests and single-process tools;
+  use SQLite when you need crash-safe persistence in one binary; use Redis
+  when several instances share a queue.
+- **Idempotency** — always set `UniqueKey` for jobs whose business effect
+  must not duplicate. The enforcement is best-effort under at-least-once
+  delivery; handlers should still tolerate rare duplicates.
+- **Graceful shutdown** — mount the queue under an `/shutdown` endpoint
+  that calls `client.Shutdown(ctx)` with a deadline; enable
+  `WithDrainOnShutdown(true)` in deployments where "finish the backlog"
+  matters.
+- **DLQ hygiene** — wire `OnDead` to an alert or DLQ inspection tool, and
+  call `RequeueDead` after fixing the upstream cause.
+- **Admin endpoints** — mount the dashboard under auth in production;
+  admin endpoints are POST-only and return `405`/`501` for unsupported
+  methods/backends, but they are not authenticated.
 
 ## Performance
 

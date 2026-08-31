@@ -69,6 +69,7 @@ own:
 | [`drain`](./examples/drain) | drain-mode shutdown finishes the backlog |
 | [`concurrency`](./examples/concurrency) | `WithMaxConcurrency` caps running handlers |
 | [`dashboard`](./examples/dashboard) | worker + embedded HTTP dashboard on `:8080` |
+| [`admin-ops`](./examples/admin-ops) | programmatic admin: `Pause`/`Purge`/`RequeueDead`/`RequeueDeadJob` |
 
 ## SQLite backend (persistent)
 

@@ -1,9 +1,10 @@
 # Changelog
 
-All notable changes to GoQueue are documented here. The format is based on
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+All notable changes to GoQueue are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+## [v1.0.0] - 2026-09-01
 
 ### Added
 - Admin operations programmatic API: `Client.Pause/Resume/IsPaused/Purge/RequeueDead/RequeueDeadJob`

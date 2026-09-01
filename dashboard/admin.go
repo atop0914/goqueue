@@ -24,8 +24,8 @@ type pauseResponse struct {
 
 // purgeResponse is the /api/admin/purge payload.
 type purgeResponse struct {
-	OK      bool `json:"ok"`
-	Purged  int  `json:"purged"`
+	OK       bool `json:"ok"`
+	Purged   int  `json:"purged"`
 	WithDead bool `json:"with_dead"`
 }
 
@@ -144,10 +144,10 @@ func (d *Dashboard) handleRequeueDead(w http.ResponseWriter, r *http.Request) {
 	if body.ID != "" {
 		if err := d.cli.RequeueDeadJob(r.Context(), body.ID); err != nil {
 			code := http.StatusInternalServerError
-			switch {
-			case err == goqueue.ErrJobNotFound:
+			switch err {
+			case goqueue.ErrJobNotFound:
 				code = http.StatusNotFound
-			case err == goqueue.ErrJobExists:
+			case goqueue.ErrJobExists:
 				code = http.StatusConflict
 			}
 			writeAdminError(w, code, err)

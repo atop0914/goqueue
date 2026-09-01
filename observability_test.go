@@ -14,8 +14,6 @@ type collector struct {
 	byEvt map[string][]JobInfo
 }
 
-func newCollector() *collector { return &collector{byEvt: map[string][]JobInfo{}} }
-
 func (c *collector) hooks() Hooks {
 	add := func(evt string) func(JobInfo) {
 		return func(i JobInfo) {

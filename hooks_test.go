@@ -48,14 +48,13 @@ func TestHooks_SuccessOrder(t *testing.T) {
 	defer c.Shutdown(context.Background())
 
 	c.Register("ok", func(ctx context.Context, payload []byte) error { return nil })
-	c.Start()
-
 	var got atomic.Value
 	c.Register("ok2", nil) // placeholder not used
 
 	if _, err := c.Enqueue(context.Background(), Job{Type: "ok", Payload: []byte("x")}); err != nil {
 		t.Fatal(err)
 	}
+	c.Start()
 	waitFor(t, 2*time.Second, func() bool {
 		return len(rec.events()) >= 2
 	})

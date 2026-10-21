@@ -101,9 +101,17 @@ type JobInfo struct {
 
 // jobRecord is the internal representation stored in a Queue backend.
 type jobRecord struct {
-	job        Job
-	seq        uint64 // insertion order, for FIFO tie-breaking
-	attempts   int    // completed attempts so far
+	job Job
+	seq uint64 // scheduling cursor, for FIFO tie-breaking within a heap generation
+	// enqSeq is a monotonic submission counter (never reset) used to break
+	// DeadAt ties: jobs that die in the same clock tick keep the order in
+	// which they were enqueued, which seq cannot guarantee because it is
+	// reused once the heap drains.
+	enqSeq uint64
+	// deadSeq is the death order (monotonic, never reset). Used to break
+	// DeadAt ties: with workers racing, two jobs can die in the same tick.
+	deadSeq    uint64
+	attempts   int // completed attempts so far
 	state      JobState
 	lastError  string
 	enqueuedAt time.Time

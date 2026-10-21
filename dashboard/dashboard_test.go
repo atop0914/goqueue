@@ -276,12 +276,27 @@ func TestAPIJobsOrderAndCap(t *testing.T) {
 	if len(payload.Dead) != 2 {
 		t.Fatalf("dead jobs = %d, want 2 (capped)", len(payload.Dead))
 	}
-	// Newest first: dead-2 died after dead-1.
-	if payload.Dead[0].ID != "dead-2" {
-		t.Errorf("newest dead job = %q, want dead-2", payload.Dead[0].ID)
+	// Newest first, oldest dropped. Assert on ordering, not on job IDs:
+	// the client runs 2 workers, so a job that fails fast can exhaust its
+	// retries before a later-enqueued one is even dequeued. Which two of
+	// the three IDs land in the DLQ window — and in which order they died —
+	// is therefore scheduling-dependent, not fixed by enqueue order.
+	if payload.Dead[0].DeadAt.Before(payload.Dead[1].DeadAt) {
+		t.Errorf("dead jobs are oldest-first: [0]=%q (%s) [1]=%q (%s), want newest first",
+			payload.Dead[0].ID, payload.Dead[0].DeadAt,
+			payload.Dead[1].ID, payload.Dead[1].DeadAt)
 	}
-	if payload.Dead[1].ID != "dead-1" {
-		t.Errorf("second dead job = %q, want dead-1", payload.Dead[1].ID)
+	// The oldest of the three must be the dropped one: the API window is
+	// the two most recent deaths.
+	all := c.Queue().Dead() // oldest first
+	if len(all) != 3 {
+		t.Fatalf("queue dead letters = %d, want 3", len(all))
+	}
+	oldest := all[0].ID
+	for _, j := range payload.Dead {
+		if j.ID == oldest {
+			t.Errorf("oldest dead job %q is in the response, want it dropped by the cap", oldest)
+		}
 	}
 }
 

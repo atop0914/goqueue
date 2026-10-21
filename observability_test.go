@@ -50,6 +50,16 @@ func TestCombineHooks_FansOutInOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, 2*time.Second, func() bool { return c.Stats().Succeeded == 1 })
+	// Stats().Succeeded is bumped inside the worker *before* the OnSuccess
+	// hooks are invoked, so a stats-based wait can return while the success
+	// chain is still running on that worker goroutine — and the trace would
+	// then be read mid-flight ([A B A] or [A B], depending on scheduling).
+	// Wait for the event we actually assert on instead.
+	waitFor(t, 2*time.Second, func() bool {
+		tmu.Lock()
+		defer tmu.Unlock()
+		return len(trace) == 4
+	})
 
 	tmu.Lock()
 	defer tmu.Unlock()

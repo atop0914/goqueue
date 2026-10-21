@@ -210,6 +210,12 @@ func (d *Dashboard) handleJobs(w http.ResponseWriter, r *http.Request) {
 // deadJobs returns the newest maxDead dead-letter jobs.
 func (d *Dashboard) deadJobs() []deadJobDTO {
 	all := d.cli.Queue().Dead() // sorted by death time ascending
+	// An empty DLQ must return an empty slice: from == -1 would make
+	// all[from] panic on the first index (unrecognized in a handler and so
+	// surfaced as a 500 with no dead jobs).
+	if len(all) == 0 {
+		return []deadJobDTO{}
+	}
 	// Newest first: iterate backwards.
 	from := len(all) - 1
 	to := from - d.maxDead + 1

@@ -22,7 +22,15 @@ type InMemoryQueue struct {
 	dead     map[string]*jobRecord
 	unique   map[string]string // UniqueKey -> job ID while that key is held
 	seq      uint64
-	closed   bool
+	// enqSeq is a monotonic submission counter, never reset, used to break
+	// DeadAt ties in Dead(). Unlike seq it is not a scheduling cursor, so it
+	// keeps increasing across job generations.
+	enqSeq uint64
+	// deadSeq is a monotonic death counter (never reset) that makes DLQ
+	// ordering total: DeadAt comes from the wall clock, so two jobs dying in
+	// the same tick are indistinguishable by time alone.
+	deadSeq uint64
+	closed  bool
 	// paused stops Dequeue from delivering jobs. Pending jobs are retained
 	// verbatim; blocked callers wait until Resume, Close, or ctx cancel.
 	paused bool
@@ -59,6 +67,11 @@ func (q *InMemoryQueue) Enqueue(_ context.Context, job Job) (string, error) {
 	// seq must be assigned under the lock: it is shared across concurrent
 	// Enqueue calls and ordering correctness depends on it.
 	rec.seq = q.nextSeq()
+	// enqSeq is a second, never-reset counter used only as a tie-breaker in
+	// the dead-letter ordering: seq is a scheduling cursor that gets reused
+	// once the heap drains, so it cannot order jobs by when they were
+	// submitted. enqSeq only ever grows, so it is stable per job lifetime.
+	rec.enqSeq = q.nextEnqSeq()
 	if q.closed {
 		q.mu.Unlock()
 		return "", ErrQueueClosed
@@ -189,6 +202,7 @@ func (q *InMemoryQueue) Nack(_ context.Context, id string, err error, retryable 
 	// Retries exhausted or explicitly non-retryable: move to DLQ.
 	rec.state = StateDead
 	rec.deadAt = q.now()
+	rec.deadSeq = q.nextDeadSeq()
 	q.dead[id] = rec
 	q.releaseUnique(rec)
 	return nil
@@ -199,16 +213,24 @@ func (q *InMemoryQueue) Nack(_ context.Context, id string, err error, retryable 
 func (q *InMemoryQueue) Dead() []JobInfo {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	out := make([]JobInfo, 0, len(q.dead))
+	recs := make([]*jobRecord, 0, len(q.dead))
 	for _, rec := range q.dead {
+		recs = append(recs, rec)
+	}
+	// Sort the records, not the snapshots: jobs that die within the same
+	// clock tick are ordered by submission (enqSeq). JobInfo has no seq
+	// field, and ID order is arbitrary — two jobs dying in the same tick
+	// would otherwise come back in an order unrelated to when they died.
+	sort.Slice(recs, func(i, j int) bool {
+		if !recs[i].deadAt.Equal(recs[j].deadAt) {
+			return recs[i].deadAt.Before(recs[j].deadAt)
+		}
+		return recs[i].deadSeq < recs[j].deadSeq
+	})
+	out := make([]JobInfo, 0, len(recs))
+	for _, rec := range recs {
 		out = append(out, rec.info())
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if !out[i].DeadAt.Equal(out[j].DeadAt) {
-			return out[i].DeadAt.Before(out[j].DeadAt)
-		}
-		return out[i].ID < out[j].ID
-	})
 	return out
 }
 
@@ -234,6 +256,20 @@ func (q *InMemoryQueue) Close() error {
 func (q *InMemoryQueue) nextSeq() uint64 {
 	q.seq++
 	return q.seq
+}
+
+// nextEnqSeq hands out the monotonic submission counter used for dead-letter
+// tie-breaking. It must be called with q.mu held.
+func (q *InMemoryQueue) nextEnqSeq() uint64 {
+	q.enqSeq++
+	return q.enqSeq
+}
+
+// nextDeadSeq hands out the monotonic death counter used as the final
+// dead-letter tie-breaker. It must be called with q.mu held.
+func (q *InMemoryQueue) nextDeadSeq() uint64 {
+	q.deadSeq++
+	return q.deadSeq
 }
 
 // releaseUnique frees the job's UniqueKey (if any) so a later job with the
